@@ -9,7 +9,7 @@ This is the PyTorch Implementation of "Test-Time Adaptation with Binary Feedback
 [Sung-Ju Lee*](https://sites.google.com/site/wewantsj/) (* Corresponding authors).
 
 [[ OpenReview ]](https://openreview.net/forum?id=A5l37HL8vX) 
-[[ arXiv ]]() 
+[[ arXiv ]](https://arxiv.org/abs/2505.18514) 
 [[ Website ]](https://nmsl.kaist.ac.kr/projects/bitta/)
 
 
