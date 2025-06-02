@@ -13,6 +13,20 @@ This is the PyTorch Implementation of "Test-Time Adaptation with Binary Feedback
 [[ Website ]](https://nmsl.kaist.ac.kr/projects/bitta/)
 
 
+## Citation
+
+If you find this repository useful, please consider citing this paper:
+
+```
+@inproceedings{lee2025bitta,
+    title={Test-Time Adaptation with Binary Feedback},
+    author={Taeckyung Lee and Sorn Chottananurak and Junsu Kim and Jinwoo Shin and Taesik Gong and Sung-Ju Lee},
+    booktitle={International Conference on Machine Learning},
+    year={2025}
+}
+```
+
+
 ## Installation Guide
 
 1. Download or clone our repository
