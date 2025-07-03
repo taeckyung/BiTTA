@@ -1008,6 +1008,8 @@ class DNN():
                 y_pred, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
                 dropout_confidences = dropout_softmax_mean[:, y_pred].diagonal()
             selected_index = torch.topk(dropout_confidences, ass_num, largest=False).indices
+        elif conf.args.sample_selection == "random":
+            selected_index = torch.randperm(len(gt_labels))[:ass_num]
         else:
             raise NotImplementedError
      
