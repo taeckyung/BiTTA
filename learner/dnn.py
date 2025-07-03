@@ -1001,110 +1001,13 @@ class DNN():
             raise NotImplementedError
         # selected_index = torch.topk(torch.Tensor(entropies), ass_num).indices
 
-        if conf.args.sample_selection == "conf_diff":
-            with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                y_pred, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
-                dropout_confidences = dropout_softmax_mean[:, y_pred].diagonal()
-                original_confidences = y_conf
-            selected_index = torch.topk(original_confidences - dropout_confidences, ass_num, largest=True).indices
-        elif conf.args.sample_selection == "agree_conf_diff":
-            with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                y_pred, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
-                dropout_confidences = dropout_softmax_mean[:, y_pred].diagonal()
-                original_confidences = y_conf
-                agreement = y_pred == dropout_softmax_mean.argmax(dim=1)
-                original_confidences[~agreement] = 0.0
-            selected_index = torch.topk(original_confidences - dropout_confidences, ass_num, largest=True).indices
-        elif conf.args.sample_selection == "random":
-            selected_index = torch.randperm(len(gt_labels))[:ass_num]
-        elif conf.args.sample_selection == "entropy":
-            selected_index = torch.topk(torch.Tensor(entropies), ass_num).indices
-        elif conf.args.sample_selection == "conf":
-            with torch.no_grad():
-                _, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
-            selected_index = torch.topk(y_conf, ass_num, largest=False).indices
-        elif conf.args.sample_selection == "energy":
-            with torch.no_grad():
-                _, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
-            selected_index = torch.topk(y_energy, ass_num, largest=False).indices
-        elif conf.args.sample_selection == "mc_entropy":
-            with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                dropout_entropies = Entropy(dropout_softmax_mean)
-            selected_index = torch.topk(dropout_entropies, ass_num, largest=True).indices
-        elif conf.args.sample_selection == "mc_conf":
+        if conf.args.sample_selection == "mc_conf":
             with torch.no_grad():
                 _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
                 # dropout_confidences = dropout_softmax_mean.max(dim=1)
                 y_pred, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
                 dropout_confidences = dropout_softmax_mean[:, y_pred].diagonal()
             selected_index = torch.topk(dropout_confidences, ass_num, largest=False).indices
-        elif conf.args.sample_selection == "mc_conf_agree":
-            with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                # dropout_confidences = dropout_softmax_mean.max(dim=1)
-                y_pred, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
-                dropout_confidences = dropout_softmax_mean[:, y_pred].diagonal()
-            agreement = y_pred != dropout_softmax_mean.argmax(dim=1)
-
-            # Step 1: Mask the confidence tensor where binary label is True
-            masked_confidence = dropout_confidences[agreement]
-
-            # Step 2: Get the top 3 indices in the masked confidence tensor
-            top3_values, top3_indices = torch.topk(masked_confidence, k=ass_num, largest=False)
-
-            # Step 3: Convert the indices of the masked tensor back to the original tensor's indices
-            original_indices = torch.nonzero(agreement).squeeze(1)  # Get original indices where binary is True
-            selected_index = original_indices[top3_indices]
-
-            if len(selected_index) < ass_num:
-                selected_index = torch.topk(dropout_confidences, ass_num, largest=False).indices
-        elif conf.args.sample_selection == "mc_disagree":
-            with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                y_pred, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
-            disagree = y_pred != dropout_softmax_mean.argmax(dim=1)
-            true_indices = torch.nonzero(disagree, as_tuple=True)[0]
-            selected_index = true_indices[torch.randperm(len(true_indices))[:ass_num]]
-            if len(selected_index) < ass_num:
-                dropout_confidences = dropout_softmax_mean[:, y_pred].diagonal()
-                selected_index = torch.topk(dropout_confidences, ass_num, largest=False).indices
-        elif conf.args.sample_selection == "mc_energy":
-            with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                energy = calc_energy(dropout_softmax_mean).cpu()
-            selected_index = torch.topk(energy, ass_num, largest=False).indices
-        elif conf.args.sample_selection == "mc_variance":
-            with torch.no_grad():
-                _, dropout_softmax_mean, dropout_softmax_var = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                max_class = dropout_softmax_mean.max(1, keepdim=False)[1]
-                variance = dropout_softmax_var[:, max_class].diagonal()
-            selected_index = torch.topk(variance, ass_num, largest=True).indices
-        elif conf.args.sample_selection == "uncertainty":
-            mcd_softmaxs, mcd_mean_softmax, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate)
-            mcd_mean_expanded = mcd_mean_softmax.unsqueeze(1).expand_as(mcd_softmaxs)
-            epistemic_uncertainty = ((mcd_softmaxs - mcd_mean_expanded) ** 2).mean(dim=1).sum(dim=1)  # variance over mc-dropouts
-            aleatoric_uncertainty = entropy(mcd_mean_softmax)
-            total_uncertainty = epistemic_uncertainty + aleatoric_uncertainty
-            selected_index = torch.topk(total_uncertainty, ass_num, largest=True).indices
-
-        elif conf.args.sample_selection == "max_conf":
-            with torch.no_grad():
-                _, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
-            selected_index = torch.topk(y_conf, 10, largest=True, sorted=False).indices[:ass_num]
-        elif conf.args.sample_selection == "min_conf":
-            with torch.no_grad():
-                _, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
-            selected_index = torch.topk(y_conf, 10, largest=False, sorted=False).indices[:ass_num]
-        
-        elif conf.args.sample_selection == "mc_conf_stable":
-            with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=10, dropout=conf.args.dropout_rate, net=self.net)
-                dropout_confidences = dropout_softmax_mean.max(dim=1).values
-            selected_index = torch.topk(dropout_confidences, 10, largest=False).indices[:ass_num]
-            
         else:
             raise NotImplementedError
      
