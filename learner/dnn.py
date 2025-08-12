@@ -751,16 +751,7 @@ class DNN():
         true_cls_list = self.json_eval['gt']
         pred_cls_list = self.json_eval['pred']
         accuracy_list = self.json_eval['accuracy']
-        conf_list = self.json_eval['confidence']
-        entropy_list = self.json_eval['entropy']
         current_accuracy_list = self.json_eval['current_accuracy']
-        dropout_conf_list = self.json_eval['dropout_confidence']
-        dropout_01_conf_list = self.json_eval['dropout_01_confidence']
-        original_ebce_list = self.json_eval['original_ebce']
-        dropout_ebce_list = self.json_eval['dropout_ebce']
-        cumul_original_ebce_list = self.json_eval['cumul_original_ebce']
-        cumul_dropout_ebce_list = self.json_eval['cumul_dropout_ebce']
-        cumul_dropout_01_ebce_list = self.json_eval['cumul_dropout_01_ebce']
 
         cls = cls.to(torch.int32)
         feats, cls, dls = feats.to(device), cls.to(device), dls.to(device)
@@ -773,34 +764,6 @@ class DNN():
         true_cls_list += current_true_cls_list
         current_pred_cls_list = [int(c) for c in y_pred.tolist()]
         pred_cls_list += current_pred_cls_list
-        conf_list += [float(c) for c in y_conf.tolist()]
-        entropy_list += [float(c) for c in y_entropy.tolist()]
-
-        if conf.args.dropout_rate != -1:
-            with torch.no_grad():
-                dropout_softmax_mean = self.dropout_inference(feats, n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                dropout_01_softmax_mean = self.dropout_inference(feats, n_iter=1, dropout=conf.args.dropout_rate, net=self.net)
-                dropout_conf_for_pred = dropout_softmax_mean[:, y_pred].diagonal()
-                dropout_01_conf_for_pred = dropout_01_softmax_mean[:, y_pred].diagonal()
-                dropout_conf_list += [float(c) for c in dropout_conf_for_pred]
-                dropout_01_conf_list += [float(c) for c in dropout_01_conf_for_pred]
-
-            original_ebce, _ = expected_calibration_error(y_conf, y_pred==cls, num_bins=10, order=2)
-            dropout_ebce, _ = expected_calibration_error(dropout_conf_for_pred, y_pred==cls, num_bins=10, order=2)
-
-            cumul_correct = torch.Tensor(true_cls_list)==torch.Tensor(pred_cls_list)
-            cumul_original_ebce, _ = expected_calibration_error(torch.Tensor(conf_list), cumul_correct, num_bins=10, order=2)
-            cumul_dropout_ebce, _ = expected_calibration_error(torch.Tensor(dropout_conf_list), cumul_correct, num_bins=10, order=2)
-            cumul_dropout_01_ebce, _ = expected_calibration_error(torch.Tensor(dropout_01_conf_list), cumul_correct, num_bins=10, order=2)
-
-            original_ebce_list.append(original_ebce)
-            dropout_ebce_list.append(dropout_ebce)
-            cumul_original_ebce_list.append(cumul_original_ebce)
-            cumul_dropout_ebce_list.append(cumul_dropout_ebce)
-            cumul_dropout_01_ebce_list.append(cumul_dropout_01_ebce)
-
-            original_conf_gt_class = y_logit[:, cls.to(torch.long)].diagonal()
-            dropout_conf_gt_class = dropout_softmax_mean[:, cls.to(torch.long)].diagonal()
 
         if len(true_cls_list) > 0:
             current_accuracy = sum(1 for gt, pred in zip(current_true_cls_list, current_pred_cls_list) if gt == pred) \
@@ -814,14 +777,6 @@ class DNN():
                         'num_batch_adapt': self.num_batch_adapt,
                         'accuracy': cumul_accuracy,
                         'current_accuracy': current_accuracy,
-                        'entropy': y_entropy.mean().item(),
-                        'confidence': y_conf.mean().item(),
-                        'energy': y_energy.mean().item(),
-                        'original_ebce': original_ebce,
-                        'dropout_ebce': dropout_ebce,
-                        'cumul_original_ebce': cumul_original_ebce,
-                        'cumul_dropout_ebce': cumul_dropout_ebce,
-                        'cumul_dropout_01_ebce': cumul_dropout_01_ebce,
                     }
 
             if conf.args.wandb:
@@ -843,14 +798,7 @@ class DNN():
         self.json_eval['gt'] = true_cls_list
         self.json_eval['pred'] = pred_cls_list
         self.json_eval['accuracy'] = accuracy_list
-        self.json_eval['confidence'] = conf_list
-        self.json_eval['entropy'] = entropy_list
         self.json_eval['current_accuracy'] = current_accuracy_list
-        self.json_eval['dropout_confidence'] = dropout_conf_list
-        self.json_eval['original_ebce'] = original_ebce_list
-        self.json_eval['dropout_ebce'] = dropout_ebce_list
-        self.json_eval['cumul_original_ebce'] = cumul_original_ebce_list
-        self.json_eval['cumul_dropout_ebce'] = cumul_dropout_ebce_list
 
     def dump_eval_online_result(self, is_train_offline=False):
         """
