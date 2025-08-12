@@ -1,7 +1,6 @@
 .DS_Store
 .idea
 
-.vscode/launch.json
 
 *.txt
 *.pkl
@@ -41,3 +40,7 @@ print_acc_server.py
 pretrained_weights
 *.zip
 *.npy
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
