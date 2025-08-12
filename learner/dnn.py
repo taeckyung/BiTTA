@@ -979,9 +979,8 @@ class DNN():
             self.add_instance_to_memory(current_sample, self.active_mem)
 
         if current_num_sample % conf.args.update_every_x != 0:
-            if not (current_num_sample == len(self.target_train_set[0]) and
-                    conf.args.update_every_x >= current_num_sample):
-        self.evaluation_online(current_num_sample, self.fifo.get_memory())
+            if not (current_num_sample == len(self.target_train_set[0]) and conf.args.update_every_x >= current_num_sample):
+                self.evaluation_online(current_num_sample, self.fifo.get_memory())
 
         if conf.args.no_adapt:
             return TRAINED
