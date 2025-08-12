@@ -24,8 +24,9 @@ VALIDATIONS=(
 
 
             # (2) Set --enable_bitta to run TTA baselines in TTA with binary feedback.
-            # Exception: For SimATTA, we have SimATTA_BIN method for TTA with binary feedback.
-            # Exception: For BiTTA, you can just run BiTTA.
+            # Otherwise, the code will run TTA without any feedback.
+            # Exception 1: For SimATTA, we have SimATTA_BIN method for TTA with binary feedback.
+            # Exception 2: For BiTTA, you can just run BiTTA.
             
             # "--log_name log/ --enable_bitta"
 
@@ -115,6 +116,12 @@ test_time_adaptation() {
             if [ "${DATASET}" = "pacs" ]; then
               high_threshold=0.99
             elif [ "${DATASET}" = "tiny-imagenet" ]; then
+              high_threshold=0.33
+            elif [ "${DATASET}" = "cifar10" ]; then
+              high_threshold=0.99
+            elif [ "${DATASET}" = "cifar100" ]; then
+              high_threshold=0.66
+            elif [ "${DATASET}" = "imagenet" ]; then
               high_threshold=0.33
             fi
             #### Train with BN
@@ -250,6 +257,21 @@ test_time_adaptation() {
               lr=0.001
               e_margin=2.1193 # 0.4*ln(5)
               d_margin=0.5
+              fisher_alpha=2000
+            elif [ "${DATASET}" = "cifar10" ]; then
+              lr=0.005
+              e_margin=0.92103 # 0.4*ln(10)
+              d_margin=0.4
+              fisher_alpha=1
+            elif [ "${DATASET}" = "cifar100" ]; then
+              lr=0.005
+              e_margin=1.84207 # 0.4*ln(100)
+              d_margin=0.4
+              fisher_alpha=1
+            elif [ "${DATASET}" = "imagenet" ]; then
+              lr=0.00025
+              e_margin=2.76310 # 0.4*ln(1000)
+              d_margin=0.05
               fisher_alpha=2000
             fi
 
