@@ -18,10 +18,21 @@ METHODS=("BiTTA")
 SEEDS=(0)
 DISTS=(1)
 VALIDATIONS=(
-            "--log_name log --active_binary"
+            # (1) For running BiTTA and SimATTA (full-label)
 
-            ## random setting for PACS : you must set TGTS="cont" ##
-            # "--log_name log/ --active_binary --random_setting"
+            "--log_name log/"  
+
+
+            # (2) Set --enable_bitta to run TTA baselines in TTA with binary feedback.
+            # Exception: For SimATTA, we have SimATTA_BIN method for TTA with binary feedback.
+            # Exception: For BiTTA, you can just run BiTTA.
+            
+            # "--log_name log/ --enable_bitta"
+
+
+            # (3) Enable --random_setting to test random data stream for PACS.
+
+            # "--log_name log/ --random_setting"
            )
 
 
@@ -30,27 +41,6 @@ MAIN_SCRIPT="main.py"
 
 ### continual adaptation ###########################
 TGTS="cont"
-# TGTS="gaussian_noise-5
-#       shot_noise-5
-#       impulse_noise-5
-#       defocus_blur-5
-#       glass_blur-5
-#       motion_blur-5
-#       zoom_blur-5
-#       snow-5
-#       frost-5
-#       fog-5
-#       brightness-5
-#       contrast-5
-#       elastic_transform-5
-#       pixelate-5
-#       jpeg_compression-5"
-
-### online adaptation ##############################
-  ### PACS ###
-# TGTS="art_painting
-#       cartoon
-#       sketch"
 
 
 echo BASE_DATASETS: "${BASE_DATASETS[@]}"
@@ -232,8 +222,6 @@ test_time_adaptation() {
             done
           elif [ "${METHOD}" = "SAR" ]; then
             EPOCH=1
-
-            BATCH_SIZE=64
             lr=0.00025 # From SAR paper: args.lr = (0.00025 / 64) * bs * 2 if bs < 32 else 0.00025
 
             #### Train with BN
@@ -242,26 +230,6 @@ test_time_adaptation() {
                 python ${MAIN_SCRIPT} --gpu_idx ${GPUS[i % ${NUM_GPUS}]} --dataset $DATASET --method ${METHOD} --tgt ${TGT} --model $MODEL ${CP} --epoch $EPOCH --seed $SEED \
                   --remove_cp --online --tgt_train_dist ${dist} --update_every_x ${update_every_x} --memory_size ${memory_size} \
                   --lr ${lr} --weight_decay ${weight_decay} \
-                  --log_prefix "${LOG_PREFIX}_${SEED}_dist${dist}" \
-                  ${validation} \
-                  2>&1 | tee raw_logs/${DATASET}_${LOG_PREFIX}_${SEED}_job${i}.txt &
-
-                i=$((i + 1))
-                wait_n
-              done
-            done
-          elif [ "${METHOD}" = "SAR_PL" ]; then
-            EPOCH=1
-
-            BATCH_SIZE=64
-            lr=0.00025 # From SAR paper: args.lr = (0.00025 / 64) * bs * 2 if bs < 32 else 0.00025
-
-            #### Train with BN
-            for dist in "${DISTS[@]}"; do
-              for TGT in $TGTS; do
-                python ${MAIN_SCRIPT} --gpu_idx ${GPUS[i % ${NUM_GPUS}]} --dataset $DATASET --method ${METHOD} --tgt ${TGT} --model $MODEL ${CP} --seed $SEED \
-                  --remove_cp --online --tgt_train_dist ${dist} --update_every_x ${update_every_x} --memory_size ${memory_size} \
-                  --weight_decay ${weight_decay} \
                   --log_prefix "${LOG_PREFIX}_${SEED}_dist${dist}" \
                   ${validation} \
                   2>&1 | tee raw_logs/${DATASET}_${LOG_PREFIX}_${SEED}_job${i}.txt &
@@ -376,7 +344,7 @@ test_time_adaptation() {
                 python ${MAIN_SCRIPT} --gpu_idx ${GPUS[i % ${NUM_GPUS}]} --dataset $DATASET --method ${METHOD} --tgt ${TGT} --model $MODEL ${CP} --epoch $EPOCH --seed $SEED \
                   --remove_cp --online --tgt_train_dist ${dist} --update_every_x ${update_every_x} --memory_size ${memory_size} --memory_type ${memory_type}\
                   --weight_decay ${weight_decay} --lr ${lr} --restoration_factor ${restoration_factor}\
-                  --log_prefix ${LOG_PREFIX}_${SEED}_dist${dist} --use_learned_stats --bn_momentum 0.3 --active_binary --dropout_rate ${dropout_rate}\
+                  --log_prefix ${LOG_PREFIX}_${SEED}_dist${dist} --use_learned_stats --bn_momentum 0.3 --dropout_rate ${dropout_rate}\
                   ${validation} --sample_selection mc_conf\
                   2>&1 | tee raw_logs/${DATASET}_${LOG_PREFIX}_${SEED}_job${i}.txt &
 

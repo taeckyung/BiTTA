@@ -80,7 +80,7 @@ class SAR(DNN):
         labels = torch.Tensor(labels).type(torch.long).to(device)
 
         dataset = torch.utils.data.TensorDataset(feats, labels)
-        data_loader = DataLoader(dataset, batch_size=conf.args.tta_batch_size,
+        data_loader = DataLoader(dataset, batch_size=conf.args.update_every_x,
                                  shuffle=True, drop_last=False, pin_memory=False)
 
         for e in range(conf.args.epoch):

@@ -1,4 +1,3 @@
-
 from abc import abstractmethod
 
 import pandas as pd
@@ -30,8 +29,7 @@ import os
 import data_loader.data_loader as data_loader_module
 
 device = torch.device("cuda:{:d}".format(conf.args.gpu_idx) if torch.cuda.is_available() else "cpu")
-torch.cuda.set_device(
-    conf.args.gpu_idx)  # this prevents unnecessary gpu memory allocation to cuda:0 when using estimator
+torch.cuda.set_device(conf.args.gpu_idx)
 
 TRAINED = 0
 SKIPPED = 1
@@ -39,8 +37,22 @@ FINISHED = 2
 
 
 class DNN():
+    """
+    Base Deep Neural Network class for test-time adaptation methods.
+    
+    This class provides the foundation for implementing various test-time adaptation 
+    algorithms with features like memory management, model checkpointing, online 
+    evaluation, and active learning capabilities.
+    """
+    
     def __init__(self, model_, corruption_list_):
-
+        """
+        Initialize the DNN with model architecture and corruption settings.
+        
+        Args:
+            model_: Model class or factory function
+            corruption_list_: List of corruption types to handle
+        """
         self.temp_value = 0
         self.count_bs1 = 63
         self.random_indexes_bs1 = np.arange(64)
@@ -57,8 +69,7 @@ class DNN():
         else:
             filter_ = None
 
-
-        ################## Init & prepare model###################
+        # Init & prepare model
         # Load model
         if "pretrained" in conf.args.model:
             pretrained = model_(pretrained=True)
@@ -76,15 +87,12 @@ class DNN():
             del pretrained
         else:
             if conf.args.model == "vitbase16":
-
                 if conf.args.dataset == "cifar10":
                     model = model_(image_size=conf.args.opt['img_size'], num_classes=conf.args.opt['num_class'], patch_size=conf.args.vit_patch_size)
                 else:
                     raise model_()
-            
             elif conf.args.model == "resnet50_domainnet":
                 model = model_()
-            
             else:
                 model = model_(filter=filter_)
 
@@ -96,13 +104,12 @@ class DNN():
             else:
                 num_feats = model.fc.in_features
                 num_class = conf.args.opt['num_class']
-                model.fc = nn.Linear(num_feats, num_class)  # match class number
+                model.fc = nn.Linear(num_feats, num_class)
                 self.net = model
-
         elif conf.args.model in ["vitbase16", "vitbase16_pretrained"]:
             self.net = model
 
-        if conf.args.load_checkpoint_path:  # false if conf.args.load_checkpoint_path==''
+        if conf.args.load_checkpoint_path:
             self.load_checkpoint(conf.args.load_checkpoint_path)
 
         norm_layer = get_normalize_layer(conf.args.dataset)
@@ -115,28 +122,22 @@ class DNN():
 
         self.net.to(device)
 
-        ##########################################################
-
-        # Important: some TTA methods would overwrite this optimizer
+        # Initialize optimizer (some TTA methods may overwrite this)
         self.optimizer = self.init_learner()
-
         self.class_criterion = nn.CrossEntropyLoss()
 
-        ##################### enhance TTA ########################
-
+        # Enhanced TTA initialization
         if conf.args.enhance_tta:
             self.enhance_tta()
 
-        ##########################################################
-
-        # online learning
+        # Initialize memory for online learning
         if conf.args.memory_type == 'FIFO':
             self.mem = memory.FIFO(capacity=conf.args.memory_size)
         elif conf.args.memory_type == 'HUS':
             self.mem = memory.HUS(capacity=conf.args.memory_size, threshold=conf.args.high_threshold)
         elif conf.args.memory_type == 'CSTU':
             self.mem = memory.CSTU(capacity=conf.args.memory_size, num_class=conf.args.opt['num_class'],
-                                         lambda_t=1, lambda_u=1)  # replace memory with original RoTTA
+                                         lambda_t=1, lambda_u=1)
         elif conf.args.memory_type == 'ConfFIFO':
             self.mem = memory.ConfFIFO(capacity=conf.args.memory_size, threshold=conf.args.high_threshold)
         elif conf.args.memory_type == "ActivePriorityFIFO":
@@ -147,7 +148,7 @@ class DNN():
             raise NotImplementedError
 
         if conf.args.enable_bitta:
-            self.active_mem = active_memory.ActivePriorityFIFO(conf.args.ass_num, pop="")
+            self.active_mem = active_memory.ActivePriorityFIFO(conf.args.n_active_sample, pop="")
         else:
             self.active_mem = None
 
@@ -158,7 +159,7 @@ class DNN():
         self.num_batch_adapt = 0
         self.budget = 0
 
-        # For BATTA
+        # For BATTA tracking
         self.rank = []
         self.rank_wrong = []
         self.temperature = 1.0
@@ -169,6 +170,14 @@ class DNN():
 
     @abstractmethod
     def init_learner(self):
+        """
+        Initialize the optimizer for the learning algorithm.
+        This method should be overridden by subclasses to provide 
+        algorithm-specific optimization configuration.
+        
+        Returns:
+            torch.optim.Optimizer: Configured optimizer
+        """
         optimizer = torch.optim.SGD(
             self.net.parameters(),
             conf.args.opt['learning_rate'],
@@ -179,19 +188,24 @@ class DNN():
 
     @abstractmethod
     def test_time_adaptation(self):
+        """
+        Perform test-time adaptation using samples from memory.
+        This method should be implemented by subclasses to define
+        the specific adaptation strategy.
+        """
         assert isinstance(self.mem, FIFO)
         feats, labels, _ = self.mem.get_memory()
         feats = torch.stack(feats).to(device)
         labels = torch.Tensor(labels).type(torch.long).to(device)
 
         dataset = torch.utils.data.TensorDataset(feats, labels)
-        data_loader = DataLoader(dataset, batch_size=conf.args.tta_batch_size,
+        data_loader = DataLoader(dataset, batch_size=conf.args.update_every_x,
                                  shuffle=True, drop_last=False, pin_memory=False)
 
         for e in range(conf.args.epoch):
             for batch_idx, (feats, _) in enumerate(data_loader):
                 if len(feats) == 1:
-                    self.net.eval()  # avoid BN error
+                    self.net.eval()
                 else:
                     self.net.train()
 
@@ -202,15 +216,31 @@ class DNN():
 
     @abstractmethod
     def run_before_training(self):
+        """
+        Execute any necessary setup before training begins.
+        This method should be implemented by subclasses.
+        """
         pass
 
     def reset(self):
+        """
+        Reset the model and optimizer to their initial state.
+        
+        Raises:
+            Exception: If no saved model/optimizer state is available
+        """
         if self.net_state is None or self.optimizer_state is None:
             raise Exception("cannot reset without saved model/optimizer")
         reset_utils.load_model_and_optimizer(self.net, self.optimizer, self.net_state, self.optimizer_state)
         self.mem.reset()
 
     def init_json(self, log_path):
+        """
+        Initialize JSON logging structures for evaluation and active learning metrics.
+        
+        Args:
+            log_path (str): Path where log files will be written
+        """
         self.write_path = log_path
         self.json_eval = {
             k: [] for k in ['gt', 'accuracy', 'current_accuracy',
@@ -223,8 +253,16 @@ class DNN():
             k: [] for k in ["budgets", "correct_loss", "wrong_loss", "unlabel_loss",
                             "num_correct_mem", "num_wrong_mem"]
         }
-    
     def set_target_data(self, source_data_loader, source_val_data_loader, target_data_loader, corruption):
+        """
+        Set up target domain data for test-time adaptation.
+        
+        Args:
+            source_data_loader: DataLoader for source domain training data
+            source_val_data_loader: DataLoader for source domain validation data
+            target_data_loader: DataLoader for target domain data
+            corruption (str): Type of corruption applied to target data
+        """
         self.source_dataloader = source_data_loader
         self.source_val_dataloader = source_val_data_loader
         self.target_dataloader = target_data_loader
@@ -268,32 +306,34 @@ class DNN():
             sink.close()
 
     def target_data_processing(self):
-
+        """
+        Process target domain data according to the specified distribution.
+        
+        Supports different target training distributions:
+        - 0: Real distribution (sequential)
+        - 1: Random distribution 
+        - 4: Dirichlet distribution for class imbalance
+        """
         features = []
         cl_labels = []
         do_labels = []
 
         for b_i, (feat, cl, dl) in enumerate(self.target_dataloader['train']):
-            # must be loaded from dataloader, due to transform in the __getitem__()
-
             features.append(feat.squeeze(0))
             cl_labels.append(cl.squeeze())
             do_labels.append(dl.squeeze())
 
         tmp = list(zip(features, cl_labels, do_labels))
-
         features, cl_labels, do_labels = zip(*tmp)
         features, cl_labels, do_labels = list(features), list(cl_labels), list(do_labels)
-
-        # num_class = conf.args.opt['num_class']
 
         result_feats = []
         result_cl_labels = []
         result_do_labels = []
 
         tgt_train_dist_ = self.tgt_train_dist
-        # real distribution
-        if tgt_train_dist_ == 0:
+        
+        if tgt_train_dist_ == 0:  # real distribution
             num_samples = conf.args.nsample if conf.args.nsample < len(features) else len(features)
             for _ in range(num_samples):
                 tgt_idx = 0
@@ -301,8 +341,7 @@ class DNN():
                 result_cl_labels.append(cl_labels.pop(tgt_idx))
                 result_do_labels.append(do_labels.pop(tgt_idx))
 
-        # random distribution
-        elif tgt_train_dist_ == 1:
+        elif tgt_train_dist_ == 1:  # random distribution
             num_samples = conf.args.nsample if conf.args.nsample < len(features) else len(features)
             for _ in range(num_samples):
                 tgt_idx = np.random.randint(len(features))
@@ -310,18 +349,16 @@ class DNN():
                 result_cl_labels.append(cl_labels.pop(tgt_idx))
                 result_do_labels.append(do_labels.pop(tgt_idx))
 
-        # dirichlet distribution
-        elif self.tgt_train_dist == 4:
+        elif self.tgt_train_dist == 4:  # dirichlet distribution
             dirichlet_numchunks = conf.args.opt['num_class']
             num_class = conf.args.opt['num_class']
 
-            # https://github.com/IBM/probabilistic-federated-neural-matching/blob/f44cf4281944fae46cdce1b8bc7cde3e7c44bd70/experiment.py
             min_size = -1
             N = len(features)
-            min_size_thresh = 10 #if conf.args.dataset in ['tinyimagenet'] else 10
-            while min_size < min_size_thresh:  # prevent any chunk having too less data
+            min_size_thresh = 10
+            while min_size < min_size_thresh:
                 idx_batch = [[] for _ in range(dirichlet_numchunks)]
-                idx_batch_cls = [[] for _ in range(dirichlet_numchunks)] # contains data per each class
+                idx_batch_cls = [[] for _ in range(dirichlet_numchunks)]
                 for k in range(num_class):
                     cl_labels_np = torch.Tensor(cl_labels).numpy()
                     idx_k = np.where(cl_labels_np == k)[0]
@@ -329,7 +366,6 @@ class DNN():
                     proportions = np.random.dirichlet(
                         np.repeat(conf.args.dirichlet_beta, dirichlet_numchunks))
 
-                    # balance
                     proportions = np.array([p * (len(idx_j) < N / dirichlet_numchunks) for p, idx_j in
                                             zip(proportions, idx_batch)])
                     proportions = proportions / proportions.sum()
@@ -337,13 +373,12 @@ class DNN():
                     idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, np.split(idx_k, proportions))]
                     min_size = min([len(idx_j) for idx_j in idx_batch])
 
-                    # store class-wise data
                     for idx_j, idx in zip(idx_batch_cls, np.split(idx_k, proportions)):
                         idx_j.append(idx)
 
             sequence_stats = []
 
-            # create temporally correlated toy dataset by shuffling classes
+            # Create temporally correlated dataset by shuffling classes
             for chunk in idx_batch_cls:
                 cls_seq = list(range(num_class))
                 np.random.shuffle(cls_seq)
@@ -354,7 +389,6 @@ class DNN():
                     result_do_labels.extend([do_labels[i] for i in idx])
                     sequence_stats.extend(list(np.repeat(cls, len(idx))))
 
-            # trim data if num_sample is smaller than the original data size
             num_samples = conf.args.nsample if conf.args.nsample < len(result_feats) else len(result_feats)
             result_feats = result_feats[:num_samples]
             result_cl_labels = result_cl_labels[:num_samples]
@@ -363,10 +397,8 @@ class DNN():
         else:
             raise NotImplementedError
 
-        remainder = len(result_feats) % conf.args.update_every_x  # drop leftover samples
-        if remainder == 0:
-            pass
-        else:
+        remainder = len(result_feats) % conf.args.update_every_x
+        if remainder != 0:
             result_feats = result_feats[:-remainder]
             result_cl_labels = result_cl_labels[:-remainder]
             result_do_labels = result_do_labels[:-remainder]
@@ -380,18 +412,26 @@ class DNN():
                 self.target_train_set = (torch.stack(result_feats),
                                          result_cl_labels,
                                          torch.stack(result_do_labels))
-            except:  # for dataset which each image has different shape
+            except:
                 self.target_train_set = (result_feats,
                                          result_cl_labels,
                                          torch.stack(result_do_labels))
 
     def save_checkpoint(self, epoch, epoch_acc, best_acc, checkpoint_path):
+        """
+        Save model checkpoint to specified path.
+        
+        Args:
+            epoch: Current training epoch
+            epoch_acc: Current epoch accuracy
+            best_acc: Best accuracy achieved so far
+            checkpoint_path (str): Path to save the checkpoint
+        """
         if isinstance(self.net, nn.Sequential):
             if isinstance(self.net[0], NormalizeLayer) or isinstance(self.net[0], IdentityLayer):
                 cp = self.net[1]
             else:
                 raise NotImplementedError
-
         else:
             cp = self.net
 
@@ -401,6 +441,12 @@ class DNN():
         torch.save(cp.state_dict(), checkpoint_path)
 
     def load_checkpoint(self, checkpoint_path):
+        """
+        Load model weights from checkpoint file.
+        
+        Args:
+            checkpoint_path (str): Path to the checkpoint file
+        """
         if checkpoint_path.split(".")[-1] == ("pickle"):
             import pickle
             with open(os.path.join(checkpoint_path), 'rb') as f:
@@ -409,19 +455,16 @@ class DNN():
             if 'resnet18' in conf.args.model:
                 if conf.args.dataset == "colored-mnist":
                     self.net = ResNetDropout18()
-
                     num_feats = self.net.fc.in_features
                     num_class = conf.args.opt['num_class']
-                    self.net.fc = nn.Linear(num_feats, num_class)  # match class number
+                    self.net.fc = nn.Linear(num_feats, num_class)
                     self.net = self.net
-
                     self.net.load_state_dict(loaded_net.state_dict())
                     self.net.to(device)
                 else:
                     raise NotImplementedError
             else:
                 raise NotImplementedError
-
         else:
             self.checkpoint = torch.load(checkpoint_path, map_location=f'cuda:{conf.args.gpu_idx}')
             if conf.args.dataset == "domainnet-126":
@@ -434,23 +477,30 @@ class DNN():
                                 keywords[i-1] = "bn_encoder"
                             keywords = keywords[:i] + keywords[i+1:]
                             break
-
                     target_k = ".".join(keywords)
-
                     temp_dict[target_k] = v
                 self.checkpoint = temp_dict
             self.net.load_state_dict(self.checkpoint, strict=True)
             self.net.to(device)
 
-    def log_loss_results(self, condition, epoch, loss_avg, train_acc_avg= None, val_loss_avg=None, val_acc_avg=None):
-
+    def log_loss_results(self, condition, epoch, loss_avg, train_acc_avg=None, val_loss_avg=None, val_acc_avg=None):
+        """
+        Log training/validation loss and accuracy results.
+        
+        Args:
+            condition (str): Training condition ('train', 'train_online', etc.)
+            epoch (int): Current epoch or sample number
+            loss_avg (float): Average loss value
+            train_acc_avg (float, optional): Average training accuracy
+            val_loss_avg (float, optional): Average validation loss
+            val_acc_avg (float, optional): Average validation accuracy
+            
+        Returns:
+            float: The loss average that was logged
+        """
         if condition == 'train_online':
-            # print loss
-            print('{:s}: [current_sample: {:d}]'.format(
-                condition, epoch
-            ))
+            print('{:s}: [current_sample: {:d}]'.format(condition, epoch))
         else:
-            # print loss
             text = '{:s}: [epoch: {:d}]\tLoss: {:.6f} \t'.format(condition, epoch, loss_avg)
             if train_acc_avg != None:
                 text += 'TrainAcc: {:.6f} \t'.format(train_acc_avg)
@@ -463,30 +513,41 @@ class DNN():
         return loss_avg
 
     def log_accuracy_results(self, condition, suffix, epoch, cm_class):
-
+        """
+        Log accuracy results from confusion matrix.
+        
+        Args:
+            condition (str): Evaluation condition ('valid', 'test')
+            suffix (str): Data subset identifier
+            epoch (int): Current epoch
+            cm_class: Confusion matrix for class predictions
+            
+        Returns:
+            float: Class accuracy percentage
+        """
         assert (condition in ['valid', 'test'])
-        # assert (suffix in ['labeled', 'unlabeled', 'test'])
 
         class_accuracy = 100.0 * np.sum(np.diagonal(cm_class)) / np.sum(cm_class)
-
         print('[epoch:{:d}] {:s} {:s} class acc: {:.3f}'.format(epoch, condition, suffix, class_accuracy))
 
         return class_accuracy
 
     def train(self, epoch):
         """
-        Train the model
+        Train the model for one epoch on source domain data.
+        
+        Args:
+            epoch (int): Current training epoch
+            
+        Returns:
+            float: Average training loss for the epoch
         """
-        # setup models
-
         self.net.train()
 
         class_loss_sum = 0.0
         class_loss_sum_val = 0.0
-
         total_iter = 0
         total_iter_val = 0
-
         total_num_correct = 0
         total_num_correct_val = 0
 
@@ -503,7 +564,6 @@ class DNN():
                     cls = cls.flatten()
                 feats, cls = feats.to(device), cls.to(device)
 
-                # compute the feature
                 preds = self.net(feats)
                 with torch.no_grad():
                     pred_cls = preds.max(axis = 1).indices
@@ -527,7 +587,6 @@ class DNN():
                             cls = cls.flatten()
                         feats, cls = feats.to(device), cls.to(device)
 
-                        # compute the feature
                         preds = self.net(feats)
                         pred_cls = preds.max(axis = 1).indices
                         num_correct_preds = (cls == pred_cls).sum()
@@ -545,11 +604,8 @@ class DNN():
 
         if conf.args.wandb:
             import wandb
-            wandb.log(
-                dict_wandb_log
-            )
+            wandb.log(dict_wandb_log)
 
-        # Logging
         self.log_loss_results('train', epoch=epoch, 
                               loss_avg=class_loss_sum / total_iter,
                               train_acc_avg=total_num_correct/total_num_samples,
@@ -558,12 +614,18 @@ class DNN():
         )
         avg_loss = class_loss_sum / total_iter
 
-
-
         return avg_loss
 
     def logger(self, name, value, epoch, condition):
-
+        """
+        Log a named metric value to file.
+        
+        Args:
+            name (str): Name of the metric to log
+            value: Value to log (can be tensor or scalar)
+            epoch (int): Current epoch/iteration
+            condition (str): Logging condition identifier
+        """
         if not hasattr(self, name + '_log'):
             exec(f'self.{name}_log = []')
             exec(f'self.{name}_file = open(self.write_path + name + ".txt", "w")')
@@ -576,8 +638,16 @@ class DNN():
         exec(f'self.{name}_file.write(write_string)')
 
     def evaluation(self, epoch, condition):
-        # Evaluate with a batch of samples, which is a typical way of evaluation. Used for pre-training or offline eval.
-
+        """
+        Evaluate model performance on target domain data in batch mode.
+        
+        Args:
+            epoch (int): Current epoch
+            condition (str): Evaluation condition identifier
+            
+        Returns:
+            tuple: (class_accuracy, loss, confusion_matrix)
+        """
         self.net.eval()
 
         with torch.no_grad():
@@ -605,16 +675,34 @@ class DNN():
         return class_accuracy, class_loss_of_test_data, class_cm_test_data
 
     def evaluation_online(self, epoch, current_samples):
-        # Evaluate with online samples that come one by one while keeping the order.
+        """
+        Evaluate model performance on online samples that arrive sequentially.
+        
+        Args:
+            epoch (int): Current sample number/epoch
+            current_samples: List containing [features, cl_labels, do_labels]
+        """
         self.net.eval()
 
-        with torch.no_grad():  # we don't log grad here
-            # extract each from list of current_sample
+        with torch.no_grad():
             features, cl_labels, do_labels = current_samples
             feats, cls, dls = (torch.stack(features), torch.stack(cl_labels), torch.stack(do_labels))
             self.evaluation_online_body(epoch, current_samples, feats, cls, dls)
 
     def model_inference(self, feats, net=None, temp=1.0, get_embedding=False, eval_mode=True):
+        """
+        Perform model inference on input features.
+        
+        Args:
+            feats: Input features tensor
+            net: Neural network model (uses self.net if None)
+            temp (float): Temperature for softmax scaling
+            get_embedding (bool): Whether to return embeddings
+            eval_mode (bool): Whether to set model in eval mode
+            
+        Returns:
+            tuple: (predictions, confidence, entropy, energy, embeddings, softmax_probs, logits)
+        """
         if net is None:
             net = self.net
 
@@ -632,17 +720,14 @@ class DNN():
             else:
                 net.eval()
 
-        # Normalization layer: self.net[0] / ResNet: self.net[1]
         if get_embedding:
             y_logit, y_embedding = net[1](net[0](feats), get_embedding=True)
             y_embedding = y_embedding[:len_feats]
-
         else:
             y_logit = net(feats)
             y_embedding = None
 
         y_logit = y_logit[:len_feats]
-
 
         y_entropy: torch.Tensor = softmax_entropy(y_logit)
         y_pred_softmax: torch.Tensor = F.softmax(y_logit / temp, dim=1)
@@ -653,8 +738,16 @@ class DNN():
         return y_pred, y_conf, y_entropy, y_energy, y_embedding, y_pred_softmax, y_logit
 
     def evaluation_online_body(self, epoch, current_samples, feats, cls, dls):
-        # get lists from json
-
+        """
+        Core evaluation logic for processing online samples and updating metrics.
+        
+        Args:
+            epoch (int): Current sample number/epoch
+            current_samples: Current batch of samples being processed
+            feats: Feature tensors
+            cls: Class labels
+            dls: Domain labels
+        """
         true_cls_list = self.json_eval['gt']
         pred_cls_list = self.json_eval['pred']
         accuracy_list = self.json_eval['accuracy']
@@ -675,7 +768,7 @@ class DNN():
         # Inference
         y_pred, y_conf, y_entropy, y_energy, y_embeddings, y_logit, y_output = self.model_inference(feats)
 
-        # append values to lists
+        # Append values to lists
         current_true_cls_list = [int(c) for c in cls.tolist()]
         true_cls_list += current_true_cls_list
         current_pred_cls_list = [int(c) for c in y_pred.tolist()]
@@ -685,8 +778,8 @@ class DNN():
 
         if conf.args.dropout_rate != -1:
             with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(feats, n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                _, dropout_01_softmax_mean, _ = self.dropout_inference(feats, n_iter=1, dropout=conf.args.dropout_rate, net=self.net)
+                dropout_softmax_mean = self.dropout_inference(feats, n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
+                dropout_01_softmax_mean = self.dropout_inference(feats, n_iter=1, dropout=conf.args.dropout_rate, net=self.net)
                 dropout_conf_for_pred = dropout_softmax_mean[:, y_pred].diagonal()
                 dropout_01_conf_for_pred = dropout_01_softmax_mean[:, y_pred].diagonal()
                 dropout_conf_list += [float(c) for c in dropout_conf_for_pred]
@@ -717,7 +810,6 @@ class DNN():
                              / float(len(true_cls_list)) * 100
             accuracy_list.append(cumul_accuracy)
 
-            
             dict_wandb_log = {
                         'num_batch_adapt': self.num_batch_adapt,
                         'accuracy': cumul_accuracy,
@@ -730,50 +822,24 @@ class DNN():
                         'cumul_original_ebce': cumul_original_ebce,
                         'cumul_dropout_ebce': cumul_dropout_ebce,
                         'cumul_dropout_01_ebce': cumul_dropout_01_ebce,
-                        # 'entropy_correct': y_entropy[y_pred == cls],
-                        # 'entropy_wrong': y_entropy[y_pred != cls],
-                        # 'original_conf_correct': original_conf_gt_class[y_pred == cls],
-                        # 'dropout_conf_correct': dropout_conf_gt_class[y_pred == cls],
-                        # 'original_conf_wrong': original_conf_gt_class[y_pred != cls],
-                        # 'dropout_conf_wrong': dropout_conf_gt_class[y_pred != cls],
-                        # 'conf_diff_correct': original_conf_gt_class[y_pred == cls] - dropout_conf_gt_class[y_pred == cls],
-                        # 'conf_diff_wrong': original_conf_gt_class[y_pred != cls] - dropout_conf_gt_class[y_pred != cls]
-                        # 'entropy_ema': self.entropy_ema,
-                        # 'entropy_diff': self.entropy_diff,
-                        # 'dropout_conf_correct': dropout_conf_for_pred[y_pred == cls],
-                        # 'dropout_conf_wrong': dropout_conf_for_pred[y_pred != cls],
-                        # 'dropout_ebce': dropout_ebce,
-                        # 'original_ebce': original_ebce,
-                        # 'cumul_dropout_ebce': cumul_dropout_ebce,
-                        # 'cumul_original_ebce': cumul_original_ebce,
-                        # 'original_conf_gt_class': original_conf_gt_class,
-                        # 'dropout_conf_gt_class': dropout_conf_gt_class,
-                        # 'original_mean_conf_gt_class': original_conf_gt_class.mean(),
-                        # 'dropout_mean_conf_gt_class': dropout_conf_gt_class.mean(),
                     }
 
             if conf.args.wandb:
                 import wandb
-                wandb.log(
-                    dict_wandb_log
-                )
+                wandb.log(dict_wandb_log)
 
             self.occurred_class = [0 for i in range(conf.args.opt['num_class'])]
-            
 
-            # epoch: 1~len(self.target_train_set[0])
             progress_checkpoint = [int(i * (len(self.target_train_set[0]) / 100.0)) for i in range(1, 101)]
-            for i in range(epoch + 1 - len(current_samples[0]), epoch + 1):  # consider a batch input
+            for i in range(epoch + 1 - len(current_samples[0]), epoch + 1):
                 if conf.args.wds_path is not None:
                     if i % conf.args.update_every_x == 0:
-                        print(
-                            f'[Online Eval][NumSample:{i}][Epoch:{i}][Accuracy:{cumul_accuracy}]')
+                        print(f'[Online Eval][NumSample:{i}][Epoch:{i}][Accuracy:{cumul_accuracy}]')
                 else:
                     if i in progress_checkpoint:
-                        print(
-                            f'[Online Eval][NumSample:{i}][Epoch:{progress_checkpoint.index(i) + 1}][Accuracy:{cumul_accuracy}]')
+                        print(f'[Online Eval][NumSample:{i}][Epoch:{progress_checkpoint.index(i) + 1}][Accuracy:{cumul_accuracy}]')
 
-        # update self.json file
+        # Update JSON evaluation metrics
         self.json_eval['gt'] = true_cls_list
         self.json_eval['pred'] = pred_cls_list
         self.json_eval['accuracy'] = accuracy_list
@@ -787,6 +853,12 @@ class DNN():
         self.json_eval['cumul_dropout_ebce'] = cumul_dropout_ebce_list
 
     def dump_eval_online_result(self, is_train_offline=False):
+        """
+        Save online evaluation results to JSON file.
+        
+        Args:
+            is_train_offline (bool): Whether to perform offline training evaluation
+        """
         if is_train_offline:
             if conf.args.wds_path is not None:
                 count_num_samples = 0
@@ -811,7 +883,6 @@ class DNN():
                     self.evaluation_online(num_sample + batchsize,
                                         [list(current_sample[0]), list(current_sample[1]), list(current_sample[2])])
 
-        # logging json files
         json_file = open(self.write_path + 'online_eval.json', 'w')
         json = self.json_eval | self.json_active
         json_subsample = {key: json[key] for key in json.keys() - {'extracted_feat'}}
@@ -820,30 +891,43 @@ class DNN():
 
     def validation(self, epoch):
         """
-        Validate the performance of the model
+        Validate the model performance.
+        
+        Args:
+            epoch (int): Current epoch
+            
+        Returns:
+            tuple: (class_accuracy, loss)
         """
         class_accuracy_of_test_data, loss, _ = self.evaluation(epoch, 'valid')
-
         return class_accuracy_of_test_data, loss
 
     def test(self, epoch):
         """
-        Test the performance of the model
+        Test the model performance.
+        
+        Args:
+            epoch (int): Current epoch
+            
+        Returns:
+            tuple: (class_accuracy, loss)
         """
-
-        #### for test data
         class_accuracy_of_test_data, loss, cm_class = self.evaluation(epoch, 'test')
-
         return class_accuracy_of_test_data, loss
 
     def add_instance_to_memory(self, current_sample, mem):
+        """
+        Add a sample instance to the specified memory buffer.
+        
+        Args:
+            current_sample: Sample to add (features, class, domain)
+            mem: Memory buffer to add the sample to
+        """
         with torch.no_grad():
             self.net.eval()
 
             if isinstance(mem, FIFO):
                 mem.add_instance(current_sample)
-
-
             else:
                 f, c, d = current_sample[0].to(device), current_sample[1].to(device), current_sample[2].to(device)
                 y_pred, y_conf, y_entropy, y_energy, y_embeddings, y_pred_softmax, _ = self.model_inference(
@@ -851,13 +935,10 @@ class DNN():
 
                 if isinstance(mem, ConfFIFO) or isinstance(mem, HUS) or isinstance(mem, Uniform) or isinstance(mem, PBRS):
                     mem.add_instance([f, y_pred.item(), d, y_conf.item(), c.item()])
-
                 elif isinstance(mem, CSTU):
                     mem.add_instance([f, y_pred.item(), y_entropy.item(), c.item()])
-
                 elif isinstance(mem, ActivePriorityFIFO):
                     mem.add_u_instance([f, c.item(), d, y_entropy.item()])
-                
                 elif isinstance(mem, ActivePriorityPBRS):
                     mem.add_u_instance([f, c.item(), d, y_entropy.item(), y_pred.item()])
                 else:
@@ -865,7 +946,13 @@ class DNN():
 
     def train_online(self, current_num_sample):
         """
-        Train the model
+        Perform online training on current sample.
+        
+        Args:
+            current_num_sample (int): Current sample number being processed
+            
+        Returns:
+            int: Training status (TRAINED, SKIPPED, or FINISHED)
         """
         if conf.args.wds_path is not None:
             if self.target_train_set is None:
@@ -875,42 +962,28 @@ class DNN():
             if current_num_sample_in_batch == 0:
                 try:
                     self.target_train_set = self.iter_target_train_set.next()
-                    # self.target_train_set[1] = self.target_train_set[1]
                 except Exception as error:
                     print("An exception occurred:", error)
-                    # f = open("ccc_error.txt", "a")
-                    # f.write(str(error))
-                    # f.close()
                     return FINISHED
             current_sample = self.target_train_set[0][current_num_sample_in_batch], self.target_train_set[1][current_num_sample_in_batch], torch.tensor([0.0])
         else:
             if current_num_sample > len(self.target_train_set[0]):
                 return FINISHED
 
-            # batch_data, cls = self.temp_dataloader[self.temp_dataloader_id]
-            # current_sample = batch_data[current_num_sample - 1], cls[current_num_sample - 1], torch.tensor([0.0])
-
-            
-            #-- comment debug
-            # # Add a sample
             batch_data, cls, dls = self.target_train_set
             current_sample = batch_data[current_num_sample - 1], cls[current_num_sample - 1], dls[current_num_sample - 1]
-        #-#
-        # print("temp")
-        self.add_instance_to_memory(current_sample, self.fifo)  # for evaluation
-        self.add_instance_to_memory(current_sample, self.mem)  # for test-time adaptation
+        
+        self.add_instance_to_memory(current_sample, self.fifo)
+        self.add_instance_to_memory(current_sample, self.mem)
         if conf.args.enable_bitta:
             self.add_instance_to_memory(current_sample, self.active_mem)
 
-        if current_num_sample % conf.args.update_every_x != 0:  # train only when enough samples are collected
+        if current_num_sample % conf.args.update_every_x != 0:
             if not (current_num_sample == len(self.target_train_set[0]) and
-                    conf.args.update_every_x >= current_num_sample):  # update with entire data
-                # self.log_loss_results('train_online', epoch=current_num_sample, loss_avg=0)
-                return SKIPPED
-
+                    conf.args.update_every_x >= current_num_sample):
         self.evaluation_online(current_num_sample, self.fifo.get_memory())
 
-        if conf.args.no_adapt:  # for ablation
+        if conf.args.no_adapt:
             return TRAINED
         
         self.pre_active_sample_selection()
@@ -932,16 +1005,32 @@ class DNN():
             })
 
         self.log_loss_results('train_online', epoch=current_num_sample, loss_avg=0)
-
         self.num_batch_adapt += 1
 
         return TRAINED
 
     @abstractmethod
     def pre_active_sample_selection(self):
+        """
+        Perform any necessary preparation before active sample selection.
+        This method will be implemented by subclasses.
+        """
         pass
 
     def dropout_inference(self, x, n_iter, dropout, net=None, temperature=1.0):
+        """
+        Perform Monte Carlo dropout inference for uncertainty estimation.
+        
+        Args:
+            x: Input tensor
+            n_iter (int): Number of dropout iterations
+            dropout (float): Dropout rate
+            net: Neural network (uses self.net if None)
+            temperature (float): Temperature for softmax scaling
+            
+        Returns:
+            tuple: (predictions, mean_predictions, std_predictions)
+        """
         if net is None:
             net = self.net
         net = self.net.module if isinstance(self.net, nn.DataParallel) or isinstance(self.net, nn.parallel.DistributedDataParallel) else net
@@ -960,18 +1049,22 @@ class DNN():
 
         predictions = []
         for _ in range(n_iter):
-            pred = net[1]((net[0](x)), dropout=dropout)  # batch_size, n_classes
+            pred = net[1]((net[0](x)), dropout=dropout)
             pred = F.softmax(pred, dim=1) / temperature
             predictions.append(pred)
 
-        predictions = torch.stack(predictions, dim=1)  # batch_size, n_iter, n_classes
-        pred_class = torch.argmax(predictions, dim=2)
+        predictions = torch.stack(predictions, dim=1)
         mean_pred = torch.mean(predictions, dim=1)
-        mean_pred_class = torch.argmax(mean_pred, dim=1)
-        std_pred = torch.std(predictions, dim=1)
-        return predictions, mean_pred, std_pred
+        return mean_pred
 
     def active_sample_selection(self, mem, current_num_sample):
+        """
+        Select samples for active learning based on uncertainty measures.
+        
+        Args:
+            mem: Memory buffer containing candidate samples
+            current_num_sample (int): Current sample number
+        """
         assert isinstance(mem, ActivePriorityFIFO) or isinstance(mem, ActivePriorityPBRS)
     
         if conf.args.memory_size == 1:
@@ -988,33 +1081,31 @@ class DNN():
             
         selected_feats, selected_labels, selected_domains = [], [], []
 
-        ass_num = conf.args.ass_num
-        if conf.args.ass_per_n_step:
-            if self.num_batch_adapt % conf.args.ass_per_n_step != 0:
+        n_active_sample = conf.args.n_active_sample
+        if conf.args.active_sample_per_n_step:
+            if self.num_batch_adapt % conf.args.active_sample_per_n_step != 0:
                 return
 
-        self.net.train()  # network is not updating BN stats (is disabled); just using test statistics
+        self.net.train()
 
         if isinstance(mem, ActivePriorityFIFO) or isinstance(mem, ActivePriorityPBRS):
             feats, gt_labels, domains, entropies = mem.get_u_memory()
         else:
             raise NotImplementedError
-        # selected_index = torch.topk(torch.Tensor(entropies), ass_num).indices
 
         if conf.args.sample_selection == "mc_conf":
             with torch.no_grad():
-                _, dropout_softmax_mean, _ = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
-                # dropout_confidences = dropout_softmax_mean.max(dim=1)
+                dropout_softmax_mean = self.dropout_inference(torch.stack(feats), n_iter=conf.args.n_dropouts, dropout=conf.args.dropout_rate, net=self.net)
                 y_pred, y_conf, y_entropy, y_energy, _, _, _ = self.model_inference(torch.stack(feats), self.net)
                 dropout_confidences = dropout_softmax_mean[:, y_pred].diagonal()
-            selected_index = torch.topk(dropout_confidences, ass_num, largest=False).indices
+            selected_index = torch.topk(dropout_confidences, n_active_sample, largest=False).indices
         elif conf.args.sample_selection == "random":
-            selected_index = torch.randperm(len(gt_labels))[:ass_num]
+            selected_index = torch.randperm(len(gt_labels))[:n_active_sample]
         else:
             raise NotImplementedError
      
 
-        self.budget += ass_num
+        self.budget += n_active_sample
         print("budget = ", self.budget)
         self.json_active['budgets'] += [self.budget]
 
@@ -1028,7 +1119,7 @@ class DNN():
             )
                 
         # add active samples to memory
-        if ass_num <= 0:
+        if n_active_sample <= 0:
             return
 
         selected_index = selected_index.sort(descending=True).values
@@ -1039,7 +1130,7 @@ class DNN():
 
             mem.remove_u_instance_by_index(idx)  # remove index from candidate pool
 
-        if not conf.args.active_binary:  # full active TTA
+        if conf.args.active_full_label:  # full active TTA
             for correct_data_i in range(len(selected_feats)):
                 data = [selected_feats[correct_data_i],
                         selected_labels[correct_data_i],
@@ -1052,395 +1143,51 @@ class DNN():
         self.net.eval()
         selected_feats_ = torch.stack(selected_feats).to(device)
         selected_labels_ = torch.Tensor(selected_labels).to(device)
-        negative_cls = []
-
-
-        with torch.no_grad():
-            y_logit = self.net(selected_feats_)
-            y_entropy = softmax_entropy(y_logit)
-            y_pred = y_logit.max(1, keepdim=False)[1]
-            for y_logit_ in y_logit:
-                negative_cls += [y_logit_.softmax(0).sort(descending = False).indices[:conf.args.ass_aug_negative].tolist()]
-
-        if conf.args.save_img:
-            for selected_feats_ii in range(len(selected_feats_)):
-                dir_path = f"save_img/{conf.args.current_corruption[:-2]}"
-                if not os.path.exists(dir_path):
-                    os.makedirs(dir_path)
-                torchvision.utils.save_image(selected_feats_[selected_feats_ii], f"{dir_path}/{self.temp_value}_gt{int(selected_labels_[selected_feats_ii])}_pred{y_pred[selected_feats_ii]}.jpg")
-                self.temp_value += 1
 
         mask_correct: torch.Tensor = y_pred == selected_labels_
 
         for match_i in range(len(mask_correct)):
             label = selected_labels_[match_i].item()
-            if conf.args.label_error_type == 'symmetric' and conf.args.label_error_rate > 0:
-                if np.random.random() < conf.args.label_error_rate:  # select noisy label
-                    indices = list(range(conf.args.opt['num_class']))
-                    indices.remove(label)
-                    label = random.choice(indices)
-            if conf.args.label_error_type == 'asymmetric' and conf.args.label_error_rate > 0:
-                if np.random.random() < conf.args.label_error_rate:  # select noisy label
-                    if conf.args.dataset == "cifar10":
-                        # TRUCK -> AUTOMOBILE, BIRD -> PLANE, DEER -> HORSE, and CAT <-> DOG
-                        if label == 9: label = 1
-                        elif label == 2: label = 0
-                        elif label == 3: label = 5
-                        elif label == 5: label = 3
-                        elif label == 5: label = 7
-                    elif conf.args.dataset == "cifar100":
-                        # shift one next in the superclass
-                        base = (label // 5) * 5
-                        new_index = (label % 5 + 1) % 5
-                        label = base + new_index
-                    else:
-                        raise NotImplementedError
+            
             if conf.args.feedback_error_rate > 0 and np.random.random() < conf.args.feedback_error_rate:
                 mask_correct[match_i] = ~mask_correct[match_i]
 
-            if conf.args.ass_aug_negative > 0:
-                if mask_correct[match_i]:
-                    data = [selected_feats[match_i],
-                        y_pred[match_i].item(),
-                        label,
-                        y_entropy[match_i].item()]
-                else:
-                    concat_class = negative_cls[match_i]
-                    if y_pred[match_i].item() in concat_class:
-                        concat_class.remove(y_pred[match_i].item())
-                    concat_class = [y_pred[match_i].item()] + concat_class
-                    data = [selected_feats[match_i],
-                        concat_class,
-                        label,
-                        y_entropy[match_i].item()]
-
-            else:
-                data = [selected_feats[match_i],
-                        y_pred[match_i].item(),
-                        label,
-                        y_entropy[match_i].item()]
+            data = [selected_feats[match_i],
+                    y_pred[match_i].item(),
+                    label,
+                    y_entropy[match_i].item()]
 
             if mask_correct[match_i]:  # correct
                 mem.add_correct_instance(data)
                 self.num_correct += 1
             else:  # wrong
                 mem.add_wrong_instance(data)
-                indices_sorted = torch.argsort(y_logit.softmax(dim=1)[match_i], descending=True)
-                rank = (indices_sorted == selected_labels_[match_i].item()).nonzero().item()
-                self.rank_wrong.append(rank)
-                if conf.args.wandb:
-                    import wandb
-                    wandb.log({
-                        'num_batch_adapt': self.num_batch_adapt,
-                        'wrong_rank': self.rank_wrong
-                    })
                 self.num_wrong += 1
 
-            indices_sorted = torch.argsort(y_logit.softmax(dim=1)[match_i], descending=True)
-            rank = (indices_sorted == selected_labels_[match_i].item()).nonzero().item()
-            self.rank.append(rank)
-            if conf.args.wandb:
-                import wandb
-                wandb.log({
-                    'num_batch_adapt': self.num_batch_adapt,
-                    'rank': self.rank,
-                    'num_correct': self.num_correct,
-                    'num_wrong': self.num_wrong
-                })
-
-    def enhance_tta(self):
-        from utils.loss_functions import complement_CrossEntropyLoss
-
-        if conf.args.model in ["resnet18_pretrained", "resnet18"]:
-            if conf.args.dataset == "pacs":
-                conf.args.enhance_tta_lr = 0.001
-                conf.args.enhance_tta_epoch = 150
-                conf.args.w_final_loss_correct = 1.0
-                conf.args.w_final_loss_wrong = 1.0
-            elif conf.args.dataset == "vlcs":
-                conf.args.enhance_tta_lr = 0.001
-                conf.args.enhance_tta_epoch = 25
-                conf.args.w_final_loss_correct = 1.0
-                conf.args.w_final_loss_wrong = 1.0
-            elif conf.args.dataset == "tiny-imagenet":
-                conf.args.enhance_tta_lr = 0.001
-                conf.args.enhance_tta_epoch = 25
-                conf.args.w_final_loss_correct = 1.0
-                conf.args.w_final_loss_wrong = 1.0
-            elif conf.args.dataset == "cifar10":
-                conf.args.enhance_tta_lr = 0.001
-                conf.args.enhance_tta_epoch = 150
-                conf.args.w_final_loss_correct = 1.0
-                conf.args.w_final_loss_wrong = 1.0
-            elif conf.args.dataset == "cifar100":
-                conf.args.enhance_tta_lr = 0.001
-                conf.args.enhance_tta_epoch = 150
-                conf.args.w_final_loss_correct = 1.0
-                conf.args.w_final_loss_wrong = 1.0
-            elif conf.args.dataset == 'imagenet':
-                conf.args.enhance_tta_lr = 0.001
-                conf.args.enhance_tta_epoch = 20
-                conf.args.w_final_loss_correct = 1.0
-                conf.args.w_final_loss_wrong = 1.0
-            else:
-                pass # use default value
-        elif conf.args.model in ['resnet50_pretrained', 'resnet50']:
-            if conf.args.dataset == "pacs":
-                conf.args.enhance_tta_lr = 0.00001
-                conf.args.enhance_tta_epoch = 5
-                conf.args.w_final_loss_correct = 1.0
-                conf.args.w_final_loss_wrong = 0.1
-            else:
-                pass
-        elif conf.args.model in ['vitbase16']:
-            if conf.args.dataset == "cifar10":
-                conf.args.enhance_tta_lr = 0.001
-                conf.args.enhance_tta_epoch = 20
-                conf.args.w_final_loss_correct = 1.0
-                conf.args.w_final_loss_wrong = 1.0
-            else:
-                pass
-        else:
-            pass
-
-
-        optimizer = torch.optim.SGD(
-            self.net.parameters(),
-            conf.args.enhance_tta_lr,
-            momentum=conf.args.opt['momentum'],
-            weight_decay=conf.args.opt['weight_decay'],
-            nesterov=True)
-
-            
-        # original_result_path, original_checkpoint_path, original_log_path = self.paths
-
-        correct_active_feats, correct_active_cls, correct_active_dls = [],[],[]
-        wrong_active_feats, wrong_active_cls, wrong_active_dls = [],[],[]
-
-        self.disable_running_stats()
-
-        dataset = conf.args.dataset
-        cond_cw = "cw"
-
-        filename_cw = f"{dataset}_enhance_cw_{conf.args.seed}_dist{conf.args.tgt_train_dist}"
-
-        file_path_cw = conf.args.opt['file_path'] + "_cw"
-
-        if conf.args.wds_path is None:
-            correct_wrong_data = load_cache(filename_cw, cond_cw, file_path_cw, transform=None)
-        else:
-            correct_wrong_data = None
-        if not correct_wrong_data:
-            for corruption_i, corruption in enumerate(self.corruption_list):
-
-                since = time.time()
-
-                if conf.args.wds_path is None:
-                    dataset = conf.args.dataset
-                    cond = corruption
-
-                    filename = f"{dataset}_enhance_{conf.args.seed}_dist{conf.args.tgt_train_dist}"
-
-                    file_path = conf.args.opt['file_path'] + "_target_train_set"
-
-                    target_train_set = load_cache(filename, cond, file_path, transform=None)
-
-                    if not target_train_set:
-
-                        print('##############Target Data Loading...##############')
-                        self.set_seed()  # reproducibility
-                        target_data_loader, _ = data_loader_module.domain_data_loader(conf.args.dataset, corruption,
-                                                                            conf.args.opt['file_path'],
-                                                                            batch_size=conf.args.enhance_tta_batchsize,
-                                                                            valid_split=0,
-                                                                            test_split=0, is_src=False,
-                                                                            num_source=conf.args.num_source)
-
-                        features, cl_labels, do_labels = [], [], []
-                        for b_i, (feat, cl, dl) in enumerate(target_data_loader['train']):
-                        # must be loaded from dataloader, due to transform in the __getitem__()
-
-                            features.append(feat.squeeze(0))
-                            cl_labels.append(cl.squeeze())
-                            do_labels.append(dl.squeeze())
-
-                        feats = torch.stack(features, axis = 0)
-                        cls = torch.stack(cl_labels)
-
-                        target_train_set = (feats, cls)
-                        save_cache(target_train_set, filename, cond, file_path, transform=None)
-
-                        time_elapsed = time.time() - since
-                        print('Data Loading Completion time: {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-
-
-                    feats, cls = target_train_set
-
-                    # randomly sampled from loaded data
-                    num_budget_per_corruption = int(conf.args.ass_num * len(feats) / 64)
-                    selected_indexes = random.sample(range(len(feats)), num_budget_per_corruption)
-                    selected_active_feats = feats[selected_indexes]
-                    selected_active_cls = cls[selected_indexes]
-                    selected_active_dls = torch.tensor([corruption_i] * len(selected_indexes))
-
-                else:
-                    url = os.path.join(conf.args.wds_path, f"{conf.args.dataset}_{conf.args.seed}_dist1_{corruption}.tar")
-
-                    preproc = torchvision.transforms.Compose(
-                        [
-                            torchvision.transforms.ToTensor(),
-                        ]
-                    )
-                    dataset = (
-                        wds.WebDataset(url, shardshuffle=True)
-                        .shuffle(1000)
-                        .decode("pil")
-                        .to_tuple("input.jpg", "output.cls", "dls.cls")
-                        .map_tuple(preproc, lambda x : x)
-                    )
-                    num_budget_per_corruption = int(conf.args.ass_num *  50000 / 64)
-                    dataloader = torch.utils.data.DataLoader(dataset, num_workers=1, batch_size=num_budget_per_corruption)
-                    selected_active_feats, selected_active_cls = iter(dataloader).next()
-
-                    # selected_active_feats = feats[selected_indexes]
-                    # selected_active_cls = cls[selected_indexes]
-                    selected_active_dls = torch.tensor([corruption_i] * num_budget_per_corruption)
-
-                # ask binary label using pre-trained src model
-                self.net.eval()
-                selected_feats_ = selected_active_feats
-                selected_labels_ = selected_active_cls
-                negative_cls = []
-
-                selected_dataset = torch.utils.data.TensorDataset(selected_feats_, )
-                selected_data_loader = DataLoader(selected_dataset, batch_size=64, shuffle=False, drop_last=False, pin_memory=False)
-
-
-                with torch.no_grad():
-                    y_pred = []
-                    for (selected_feat,) in selected_data_loader:
-                        selected_feat = selected_feat.to(device)
-                        y_pred_ = self.net(selected_feat).max(1, keepdim=False)[1].cpu()
-                        # y_entropy = softmax_entropy(y_logit)
-                        # y_pred_ = y_logit.max(1, keepdim=False)[1]
-                        y_pred += [y_pred_]
-                    y_pred = torch.concat(y_pred)
-
-                mask_correct: torch.Tensor = y_pred == selected_labels_
-
-                correct_active_feats += [selected_active_feats[mask_correct]]
-                correct_active_cls += [y_pred[mask_correct]]
-                correct_active_dls += [selected_active_dls[mask_correct]]
-
-
-                wrong_active_feats += [selected_active_feats[~mask_correct]]
-                wrong_active_cls += [y_pred[~mask_correct]]
-                wrong_active_dls += [selected_active_dls[~mask_correct]]
-
-            correct_active_feats = torch.cat(correct_active_feats, axis = 0)
-            correct_active_cls = torch.cat(correct_active_cls, axis = 0)
-            correct_active_dls = torch.cat(correct_active_dls)
-
-            wrong_active_feats = torch.cat(wrong_active_feats, axis = 0)
-            wrong_active_cls = torch.cat(wrong_active_cls, axis = 0)
-            wrong_active_dls = torch.cat(wrong_active_dls)
-
-            correct_wrong_data = (correct_active_feats, correct_active_cls, correct_active_dls, wrong_active_feats, wrong_active_cls, wrong_active_dls)
-
-            save_cache(correct_wrong_data, filename_cw, cond_cw, file_path_cw, transform=None)
-
-
-        correct_active_feats, correct_active_cls, correct_active_dls, wrong_active_feats, wrong_active_cls, wrong_active_dls = correct_wrong_data
-
-        correct_dataset = torch.utils.data.TensorDataset(correct_active_feats, correct_active_cls, correct_active_dls)
-        correct_data_loader = DataLoader(correct_dataset, batch_size=conf.args.enhance_tta_batchsize,
-                                 shuffle=True, drop_last=False, pin_memory=False)
-
-        wrong_dataset = torch.utils.data.TensorDataset(wrong_active_feats, wrong_active_cls, wrong_active_dls)
-        wrong_data_loader = DataLoader(wrong_dataset, batch_size=conf.args.enhance_tta_batchsize,
-                                 shuffle=True, drop_last=False, pin_memory=False)
-
-
-        print("correct_samples :", len(correct_active_feats))
-        print("wrong_samples :", len(wrong_active_feats))
-        print("total_samples :", len(correct_active_feats) + len(wrong_active_feats))
-
-        # self.net.train()
-        for epoch in range(conf.args.enhance_tta_epoch):
-            loss_log = 0.0
-            for (correct_feats_, correct_labels_, correct_domains_), (wrong_feats_, wrong_labels_, wrong_domains_) in zip(correct_data_loader, wrong_data_loader):
-                correct_loss = torch.tensor([0.0]).to(device)
-                wrong_loss = torch.tensor([0.0]).to(device)
-
-                # correct samples
-                correct_feats_ = correct_feats_.to(device)
-                correct_labels_ = correct_labels_.to(device)
-
-                correct_outputs = self.net(correct_feats_)
-                correct_loss = self.class_criterion(correct_outputs, correct_labels_)
-
-                # wrong samples
-                wrong_feats_ = wrong_feats_.to(device)
-                wrong_labels_ = wrong_labels_.to(device)
-
-                wrong_outputs = self.net(wrong_feats_)
-
-                # filter_idx = (wrong_outputs > 1 / conf.args.opt['num_class'])
-                # for i in range(len(wrong_outputs)):
-                #     filter_idx[i][wrong_labels_[i]] = 0.0
-
-                # new_wrong_output = wrong_outputs.clone().detach()
-                # new_wrong_output[~filter_idx] = 0.0
-                # new_wrong_output = F.normalize(new_wrong_output, p=1, dim=1)
-
-                # wrong_loss = self.class_criterion(wrong_outputs, new_wrong_output)
-
-                wrong_loss = complement_CrossEntropyLoss(wrong_outputs, wrong_labels_)
-
-
-                loss = conf.args.w_final_loss_correct * correct_loss + conf.args.w_final_loss_wrong * wrong_loss
-
-                if conf.args.wandb:
-                    import wandb
-                    wandb.log({
-                        'loss_correct': correct_loss.item(),
-                        'loss_wrong': wrong_loss.item(),
-                        'loss_total': loss.item(),
-                    })
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                loss_log += loss.item()
-
-            print(f"training : epoch {epoch + 1}, loss : {loss_log}")
-
-        self.enable_running_stats()
-        enhance_path = conf.args.enhance_save_path + f'/{conf.args.dataset}/enhance_{conf.args.seed}'
-        if not os.path.exists(enhance_path):
-            oldumask = os.umask(0)
-            os.makedirs(enhance_path, 0o777)
-            os.umask(oldumask)
-        self.save_checkpoint(None, None, None, f'{enhance_path}/cp_last.pth.tar')
-
     def disable_running_stats(self):
+        """
+        Disable running statistics tracking in BatchNorm layers.
+        """
         for module in self.net.modules():
             if isinstance(module, nn.BatchNorm1d) or isinstance(module, nn.BatchNorm2d):
-                if conf.args.use_learned_stats:  # use learn stats
+                if conf.args.use_learned_stats:
                     module.track_running_stats = True
                     module.momentum = 0
 
-
     def enable_running_stats(self):
+        """
+        Enable running statistics tracking in BatchNorm layers.
+        """
         for module in self.net.modules():
             if isinstance(module, nn.BatchNorm1d) or isinstance(module, nn.BatchNorm2d):
-                if conf.args.use_learned_stats:  # use learn stats
+                if conf.args.use_learned_stats:
                     module.track_running_stats = True
                     module.momentum = conf.args.bn_momentum
 
-
     def set_seed(self):
+        """
+        Set random seeds for reproducibility.
+        """
         torch.manual_seed(conf.args.seed)
         np.random.seed(conf.args.seed)
         random.seed(conf.args.seed)
@@ -1449,17 +1196,22 @@ class DNN():
         torch.use_deterministic_algorithms(True)
 
     def get_bitta_ssl_loss(self):
+        """
+        Compute **TTA with binary feedback** baseline loss functions using correct and wrong samples.
+        (This is NOT a BiTTA's algorithm)
+        
+        Returns:
+            torch.Tensor: Combined loss from correct and wrong predictions
+        """
         assert conf.args.enable_bitta
         self.disable_running_stats()
 
         loss = 0.0
 
-
         correct_feats, correct_preds, _, _ = self.active_mem.get_correct_memory()
         wrong_feats, wrong_preds, wrong_gt_labels, _ = self.active_mem.get_wrong_memory()
 
         if correct_preds is not None and len(correct_preds) > 0:
-
             if len(correct_preds) == 1:
                 if not conf.args.use_learned_stats:
                     correct_feats = correct_feats + correct_feats
@@ -1469,10 +1221,9 @@ class DNN():
             correct_logits = self.net(torch.stack(correct_feats).to(device)).softmax(1)[:len(correct_preds)]
             correct_preds = torch.tensor(correct_preds).to(device)
             correct_loss = F.cross_entropy(correct_logits, correct_preds.detach())
-            loss += conf.args.w_final_loss_correct * correct_loss
+            loss += correct_loss
 
         if wrong_preds is not None and len(wrong_preds) > 0:
-
             if len(wrong_preds) == 1:
                 if not conf.args.use_learned_stats:
                     wrong_feats = wrong_feats + wrong_feats
@@ -1482,7 +1233,7 @@ class DNN():
             wrong_logits = self.net(torch.stack(wrong_feats).to(device)).softmax(1)[:len(wrong_preds)]
             wrong_preds = torch.tensor(wrong_preds).to(device)
             wrong_loss = complement_CrossEntropyLoss(wrong_logits, wrong_preds.detach())
-            loss += conf.args.w_final_loss_wrong * wrong_loss
+            loss += wrong_loss
 
         self.enable_running_stats()
         return loss

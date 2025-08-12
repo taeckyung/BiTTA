@@ -90,8 +90,8 @@ def main():
         
     if conf.args.weight_decay:
         opt['weight_decay'] = conf.args.weight_decay
-    if conf.args.batch_size:
-        opt['batch_size'] = conf.args.batch_size
+    if conf.args.dataloader_batch_size:
+        opt['batch_size'] = conf.args.dataloader_batch_size
     conf.args.opt = opt
 
     model = None
@@ -132,11 +132,9 @@ def main():
     from learner.rotta import RoTTA
     from learner.eata import ETA, EATA
     from learner.bitta import BiTTA
-    from learner.sar_pl import SAR_PL
 
     from learner.simatta import SimATTA
     from learner.simatta_bin import SimATTA_BIN
-    from learner.bitta_parallel import BITTA_PARALLEL
 
     result_path, checkpoint_path, log_path = get_path()
 
@@ -154,8 +152,6 @@ def main():
         learner_method = CoTTA
     elif conf.args.method == 'SAR':
         learner_method = SAR
-    elif conf.args.method == 'SAR_PL':
-        learner_method = SAR_PL
     elif conf.args.method == "RoTTA":
         learner_method = RoTTA
     elif conf.args.method == 'SoTTA':
@@ -184,8 +180,6 @@ def main():
     # Our method
     elif conf.args.method == "BiTTA":
         learner_method = BiTTA
-        if conf.args.dropout_parallel:
-            learner_method = BITTA_PARALLEL
     else:
         raise NotImplementedError
 
@@ -210,8 +204,8 @@ def main():
             corruption_list_ = cont_seq[conf.args.cont_seq]
         
         if conf.args.dataset == 'tiny-imagenet':
-            # corruption_list_.remove("brightness-5")
-            # corruption_list_ = ["brightness-5"]
+            # Note that ATTA paper removed brightness-5 here because they fine-tuned the model with brightness;
+            # we pretrain with tiny-imagenet and maintain brightness-5 here
             pass
         corruption_list += corruption_list_
         
@@ -220,7 +214,6 @@ def main():
 
 
     original_result_path, original_checkpoint_path, original_log_path = result_path, checkpoint_path, log_path
-    # paths = [original_result_path, original_checkpoint_path, original_log_path]
     learner = learner_method(model, corruption_list)
     
     if conf.args.random_setting:
@@ -228,7 +221,6 @@ def main():
         corruption_list = [corruption_list]
 
     for corruption in corruption_list:
-        conf.args.current_corruption = corruption
         learner.temp_value = 0
         if conf.args.random_setting:
             corruption_name = "random"
@@ -303,7 +295,6 @@ def main():
             dataset = (
                 wds.WebDataset(url)
                 .decode("pil")
-                # .to_tuple("input.jpg", "output.cls", "dls.cls")
                 .to_tuple("input.jpg", "output.cls")
                 .map_tuple(preproc, lambda x : x)
             )
@@ -399,12 +390,6 @@ def main():
                 os.remove(best_path)
             except Exception as e:
                 pass
-            
-        # if conf.args.da_detection:
-        #     learner.freeze_correct_samples = True
-        #     learner.cnt_correct_after_frze = 0
-        
-        # temp_dataloader_id_ += 1
 
 def parse_arguments(argv):
     """Command line parse."""
@@ -414,7 +399,6 @@ def parse_arguments(argv):
     parser = argparse.ArgumentParser()
 
     ###MANDATORY###
-
     parser.add_argument('--dataset', type=str, default='',
                         help='Dataset to be used, in [ichar, icsr, dsa, hhar, opportunity, gait, pamap2]')
 
@@ -533,55 +517,30 @@ def parse_arguments(argv):
     parser.add_argument("--start_num_cluster", type=int, default=10)
     parser.add_argument('--atta_limit_mem_size' , type=int, default=None)
     parser.add_argument('--atta_limit_batch_active_sample' , type=int, default=None)
-    
     # adaptation batch size : SimATTA has batch size smaller than memory's size in test time
-    parser.add_argument('--tta_batch_size', type=int, default=64, help='')
+    parser.add_argument('--atta_batch_size', type=int, default=64, help='')
     
-    # sample selection
-    parser.add_argument('--ass_mem_capacity', type=int, default=64, help='capcacity of candidate pool for active sample selection')
-    parser.add_argument('--ass_num', type=int, default=3, help='number of active samples per batch')
-    parser.add_argument('--ass_per_n_step', type=int, default=0, help='test sparse active sampling with only sampling 1 batch per N steps')
-    parser.add_argument("--active_binary", action='store_true', default=False)
-    parser.add_argument('--ass_aug_negative',  type=int, default=0, help='number of augmentation on negative samples')
+    # TTA with binary feedback
+    parser.add_argument('--n_active_sample', type=int, default=3, help='number of active samples per batch')
+    parser.add_argument('--active_sample_per_n_step', type=int, default=0, help='test sparse active sampling with only sampling 1 batch per N steps')
+    parser.add_argument("--active_full_label", action='store_true', default=False)
+    parser.add_argument('--feedback_error_rate', type=float, default=0, help='Feedback error rate')
+    parser.add_argument('--enable_bitta',action='store_true', default=False, help="Use to turn on TTA with binary feedback")
 
-    # test
-    parser.add_argument('--w_final_loss_correct', type=float, default=1.0, help='')
-    parser.add_argument('--w_final_loss_wrong', type=float, default=1.0, help='')
-    parser.add_argument('--w_final_loss_unlabeled', type=float, default=1.0, help='')
-    parser.add_argument('--w_final_loss_reward', type=float, default=0.0, help='')
+    # BiTTA
+    parser.add_argument('--w_final_bfa_loss', type=float, default=1.0, help='')
+    parser.add_argument('--w_final_aba_loss', type=float, default=1.0, help='')
     parser.add_argument('--sample_selection', type=str, default="random")
-    parser.add_argument('--conf_threshold', type=float, default=-1)
-    parser.add_argument('--dropout_parallel_gpus', type=int, nargs='*', default=None)
-
-    parser.add_argument('--reset_every_corruption', action='store_true', default=False, help="Reset the model and memory every corruption")
 
     parser.add_argument('--n_dropouts', type=int, default=4)
     parser.add_argument('--dropout_rate', type=float, default=-1)
 
-    parser.add_argument('--dropout_parallel', action='store_true', default=False)
-    parser.add_argument('--local_rank', type=int)
-    parser.add_argument('--ablation_conf_th', type=float, default=-1, help='')
-    parser.add_argument('--ablation_ent_th', type=float, default=-1, help='')
+    parser.add_argument('--reset_every_corruption', action='store_true', default=False, help="Reset the model and memory every corruption")
 
-    parser.add_argument('--label_error_type', type=str, default='', help="'', 'symmetric', 'asymmetric'")
-    parser.add_argument('--label_error_rate', type=float, default=0, help='Labeling error rate')
-
-    parser.add_argument('--feedback_error_rate', type=float, default=0, help='Feedback error rate')
 
     # random setting
     parser.add_argument('--random_setting', action='store_true', default=False)
-
-    # ELPT
-    parser.add_argument('--elpt_k',type=int, default=5, help='')
-    parser.add_argument('--elpt_m',type=int, default=3, help='')
-    parser.add_argument('--elpt_interval',type=int, default=4, help='number of epoch to train after each sampled time')
-    parser.add_argument('--elpt_sample_time',type=int, default=5, help='number of samples time to ask for labels')
-
-    # MHDL
-    parser.add_argument('--mhpl_kk',type=int, default=20, help='')
-    parser.add_argument('--mhpl_alpha',type=float, default=3.0, help='')
-
-    parser.add_argument('--batch_size',type=int, default=None, help='')
+    parser.add_argument('--dataloader_batch_size',type=int, default=None, help='')
 
     # enhance tta
     parser.add_argument('--enhance_tta',action='store_true', default=False)
@@ -590,31 +549,10 @@ def parse_arguments(argv):
     parser.add_argument('--enhance_tta_batchsize',type=int, default=64, help='')
     parser.add_argument('--enhance_save_path',type=str, default="enhance_cp", help='')
 
-    parser.add_argument('--turn_off_dropout', action='store_true', default=False)
-
-    # for ADA baselins
-    parser.add_argument('--turn_to_binary', action='store_true', default=False)
-
-    parser.add_argument('--save_img', action='store_true', default=False)
-    parser.add_argument('--current_corruption', type=str, default="", help='')
-
-    parser.add_argument('--softlabel',action='store_true', default=False)
-    parser.add_argument('--dropout_softlabel',action='store_true', default=False)
-    parser.add_argument('--activate_filter',action='store_true', default=False)
-    parser.add_argument('--activate_c_aug',action='store_true', default=False)
-    parser.add_argument('--activate_w_aug',action='store_true', default=False)
-    parser.add_argument('--dynamic_u', type=int, default=0, help='')
-
-    parser.add_argument('--rho_sar',type=float, default=0.05, help='')
-    parser.add_argument('--beta_sharp',type=float, default=1.0, help='')
-    parser.add_argument('--activate_entropy',action='store_true', default=False)
-    parser.add_argument('--beta_sharp2',type=float, default=1.0, help='')
-
     parser.add_argument('--save_wds_dataset',action='store_true', default=False)
     parser.add_argument('--wds_path',type=str, default=None, help='')
     
     parser.add_argument('--vit_patch_size',type=int, default=16, help='')
-    parser.add_argument('--enable_bitta',action='store_true', default=False)
     parser.add_argument('--replace_augmentation',action='store_true', default=False)
     parser.add_argument('--replace_entropy_loss',action='store_true', default=False)
     parser.add_argument('--use_original_conf',action='store_true', default=False)
@@ -646,17 +584,6 @@ if __name__ == '__main__':
     print(conf.args)
     set_seed()
 
-    # if conf.args.dropout_parallel:
-    #     os.environ["MASTER_ADDR"] = "localhost"
-    #     os.environ["MASTER_PORT"] = "12355"
-    #     conf.args.rank = conf.args.local_rank
-    #     conf.args.world_size = int(conf.args.n_dropouts)
-    #
-    #     dist.init_process_group(backend='nccl', init_method='env://', rank=conf.args.rank, world_size=conf.args.world_size)
-    #     torch.cuda.set_device(conf.args.rank)
-    #     conf.args.gpu_idx = conf.args.rank
-
-    # if not conf.args.dropout_parallel or conf.args.rank == 0:  # source GPU
     if conf.args.wandb:
         import wandb
         wandb.init(project=conf.args.wandb, name=conf.args.method+"/"+conf.args.wandb_name, config=vars(conf.args))
@@ -664,7 +591,5 @@ if __name__ == '__main__':
         wandb.define_metric("original_mean_conf_gt_class", summary="mean")
         wandb.define_metric("dropout_mean_conf_gt_class", summary="mean")
         wandb.define_metric("wall_clock_time_per_batch", summary="mean")
-    # else:
-    #     conf.args.wandb = False
 
     main()

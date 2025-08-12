@@ -1,4 +1,4 @@
-# BiTTA: Test-Time Adaptation with Binary Feedback
+# Test-Time Adaptation with Binary Feedback (ICML '25)
 
 This is the PyTorch Implementation of "Test-Time Adaptation with Binary Feedback (ICML '25)" by 
 [Taeckyung Lee](https://taeckyung.github.io/),
@@ -39,23 +39,21 @@ If you find this repository useful, please consider citing this paper:
 We use [Conda environment](https://docs.conda.io/).
 You can get conda by installing [Anaconda](https://www.anaconda.com/) first.
 
-We share our python environment that contains all required python packages. Please refer to the `./bitta.yml` file
+We share our python environment that contains all required python packages. Please refer to the `./environment.yml` file
 
 You can import our environment using conda:
 
-    conda env create -f bitta.yml -n bitta
-
-Reference: https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html#creating-an-environment-from-an-environment-yml-file
+    $ conda env create -f environment.yml -n bitta
+    $ conda activate bitta
 
 ## Prepare Datasets
 
 To run our codes, you first need to download at least one of the datasets. Run the following commands:
 
-    $ cd .                               #project root
-    $ . download_cifar10c.sh             #download CIFAR10/CIFAR10-C datasets
-    $ . download_cifar100c.sh            #download CIFAR100/CIFAR100-C datasets
-    $ . download_pacs.sh                 #download PACS datasets
-    $ . download_tiny_imagenet.sh        #download Tiny-ImageNet-C datasets
+    $ ./download_cifar10c.sh             #download CIFAR10/CIFAR10-C datasets
+    $ ./download_cifar100c.sh            #download CIFAR100/CIFAR100-C datasets
+    $ ./download_pacs.sh                 #download PACS datasets
+    $ ./download_tiny_imagenet.sh        #download Tiny-ImageNet-C datasets
 
 ## Run
 
@@ -65,7 +63,7 @@ You first need to create the directory for pre-trained weights :
     $ cd .                               #project root
     $ mkdir pretrained_weights           #create blank directory for pre-trained weights
 
-We prepare the pre-trained and fine-tuned model for adaptation at [Google Drive link](https://drive.google.com/drive/folders/1gJt0uRVQRVML-kk6aLgLFLMFxnUJ-k4y?usp=sharing). 
+We prepare the pre-trained and fine-tuned model for adaptation at [Google Drive link](https://drive.google.com/drive/folders/1gJt0uRVQRVML-kk6aLgLFLMFxnUJ-k4y?usp=sharing). We plan to update weights in HuggingFace.
 Make sure that the pre-trained and fine-tuned model files are in the `./pretrained_weights` folder:
 ```
 BiTTA
@@ -88,11 +86,11 @@ BiTTA
 
 Given source models are available, you can run TTA via:
 
-    $. tta.sh                       #Run continual CIFAR10-C with BiTTA as default.
+    $ ./tta.sh                       #Run continual CIFAR10-C with BiTTA as default.
 
 You can specify which dataset and which method in the script file.
 
-Note that you must add `--active_binary` flag to enable TTA with binary feedback for TTA/active-TTA methods.
+Note that you must add `--enable_bitta` flag to enable TTA with binary feedback for TTA/active-TTA methods.
 
 ## Log
 

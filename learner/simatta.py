@@ -123,7 +123,7 @@ class SimATTA(DNN):
             self.atta_variables['eh'] = conf.args.atta_upper_th
             self.atta_variables['el'] = conf.args.atta_lower_th
             self.atta_variables['steps'] = 30
-            self.atta_variables['train_bs'] = conf.args.tta_batch_size
+            self.atta_variables['train_bs'] = conf.args.atta_batch_size
             self.atta_variables['gpu_clustering'] = False
             
         self.atta_variables['num_workers'] = 0 # 8

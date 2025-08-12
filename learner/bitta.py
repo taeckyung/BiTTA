@@ -1,59 +1,64 @@
 import os
-from contextlib import nullcontext
-
+import copy
 import PIL
-import math
-import pandas as pd
 import torch.nn
 from torch import optim
 from torch.nn import KLDivLoss
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision import transforms
+from torch.utils.data import DataLoader
 
 import conf
 from utils import cotta_utils, mecta
 from .dnn import DNN
-from torch.utils.data import DataLoader
-
 from utils.loss_functions import *
-import copy
-from torchvision.transforms.functional import to_pil_image
 
 device = torch.device("cuda:{:d}".format(conf.args.gpu_idx) if torch.cuda.is_available() else "cpu")
 
 
 class BiTTA(DNN):
     """
-    Code is partially inspired from:
-    - https://github.com/taeckyung/SoTTA/blob/main/learner/sotta.py
-    - https://github.com/tmllab/2023_NeurIPS_FlatMatch/blob/main/trainer.py
+    BiTTA (Binary Test-Time Adaptation) implementation.
+    
+    This class implements the BiTTA method for test-time adaptation, which uses
+    binary feedback (correct/wrong) from actively selected samples to adapt
+    the model during test time. It combines two types of losses:
+    - BFA (Binary Feedback Adaptation) loss for actively labeled samples
+    - ABA (Agreement-Based Adaptation) loss for unlabeled samples
+    
+    The implementation is inspired by:
+    - SoTTA: https://github.com/taeckyung/SoTTA
+    - FlatMatch: https://github.com/tmllab/2023_NeurIPS_FlatMatch
     """
 
     def __init__(self, *args, **kwargs):
+        """
+        Initialize BiTTA model. Refer `init_learner()` for actual initialization.
+        """
         self.atta_src_net = None
         super(BiTTA, self).__init__(*args, **kwargs)
-        self.transform = get_tta_transforms()
         assert (conf.args.memory_type in ["ActivePriorityFIFO", "ActivePriorityPBRS"])
 
     def reset(self):
+        """Reset the BiTTA model to its initial state."""
         super(BiTTA, self).reset()
 
     def init_learner(self):
-        for param in self.net.parameters():  # turn on requires_grad for all
+        """
+        Initialize the learner by setting up parameters for adaptation.
+        
+        This method configures which parameters should be adapted during test-time,
+        sets up BatchNorm layer behavior, and initializes the optimizer.
+        
+        Returns:
+            torch.optim.Optimizer: Configured SGD optimizer for adaptation
+        """
+        # Enable gradients for all parameters
+        for param in self.net.parameters():
             param.requires_grad = True
 
         for name, module in self.net.named_modules():
-            # skip top layers for adaptation: layer4 for ResNets and blocks9-11 for Vit-Base
-            if 'fc' in name:
-                for param in module.parameters():
-                    param.requires_grad = True
-                continue
-
             if isinstance(module, nn.BatchNorm1d) or isinstance(module, nn.BatchNorm2d):
-                # https://pytorch.org/docs/stable/generated/torch.nn.BatchNorm1d.html
-                # TENT: force use of batch stats in train and eval modes: https://github.com/DequanWang/tent/blob/master/tent.py
-                if conf.args.use_learned_stats:  # use learn stats
+                if conf.args.use_learned_stats:
                     module.track_running_stats = True
                     module.momentum = conf.args.bn_momentum
                 else:
@@ -64,7 +69,7 @@ class BiTTA(DNN):
                 module.weight.requires_grad_(True)
                 module.bias.requires_grad_(True)
 
-        if conf.args.enable_mecta:
+        if conf.args.enable_mecta:  # for additional study
             self.net = mecta.prepare_model(self.net).to(device)
 
         optimizer = torch.optim.SGD(
@@ -79,32 +84,41 @@ class BiTTA(DNN):
         return optimizer
 
     def test_time_adaptation(self):
-        # Unlabeled data
+        """
+        Perform test-time adaptation using BiTTA algorithm.
+        
+        This method implements the core BiTTA adaptation procedure:
+        1. Prepare data loaders for unlabeled, correct, and wrong samples
+        2. Apply Monte Carlo Dropout for uncertainty estimation
+        3. Compute BFA and ABA losses
+        4. Update model parameters
+        5. Apply stochastic restoration if enabled
+        """
+        # Prepare unlabeled data
         u_feats, u_labels, _, _ = self.mem.get_u_memory()
         if len(u_feats) != 0:
             u_feats = torch.stack(u_feats).to(device)
             u_labels = torch.tensor(u_labels).to(device)
             u_dataset = torch.utils.data.TensorDataset(u_feats, u_labels)
-            u_dataloader = DataLoader(u_dataset, batch_size=conf.args.update_every_x, #len(u_feats),
+            u_dataloader = DataLoader(u_dataset, batch_size=conf.args.update_every_x,
                                       shuffle=True, drop_last=False, pin_memory=False)
         else:
             u_dataloader = [(None, None)]
 
-        # Correct data
+        # Prepare correct samples
         correct_feats, correct_labels, _, _ = self.mem.get_correct_memory()
-        # print(len(correct_labels))
         self.json_active['num_correct_mem'] += [len(correct_labels)]
         if len(correct_feats) != 0:
             correct_feats = torch.stack(correct_feats).to(device)
             correct_labels = torch.tensor(correct_labels).to(device)
 
             correct_dataset = torch.utils.data.TensorDataset(correct_feats, correct_labels)
-            correct_dataloader = DataLoader(correct_dataset, batch_size=conf.args.update_every_x, #len(correct_feats),
+            correct_dataloader = DataLoader(correct_dataset, batch_size=conf.args.update_every_x,
                                             shuffle=True, drop_last=False, pin_memory=False)
         else:
             correct_dataloader = [(None, None)]
 
-        # Wrong data
+        # Prepare wrong samples
         wrong_feats, wrong_labels, wrong_gt_labels, _ = self.mem.get_wrong_memory()
         self.json_active['num_wrong_mem'] += [len(wrong_labels)]
         if len(wrong_feats) != 0:
@@ -113,7 +127,7 @@ class BiTTA(DNN):
             wrong_gt_labels = torch.tensor(wrong_gt_labels, dtype=torch.long).to(device)
 
             wrong_dataset = torch.utils.data.TensorDataset(wrong_feats, wrong_labels, wrong_gt_labels)
-            wrong_dataloader = DataLoader(wrong_dataset, batch_size=conf.args.update_every_x, # len(wrong_feats),
+            wrong_dataloader = DataLoader(wrong_dataset, batch_size=conf.args.update_every_x,
                                           shuffle=True, drop_last=False, pin_memory=False)
         else:
             wrong_dataloader = [(None, None, None)]
@@ -140,25 +154,25 @@ class BiTTA(DNN):
                 assert(len(data) > 0)
                 data = torch.cat(data, dim=0)
 
-                # For optimization
-                _, mcd_mean_softmax, _ = self.dropout_inference(data, conf.args.n_dropouts, dropout=conf.args.dropout_rate)
+                # Apply Monte Carlo Dropout for optimization
+                mcd_mean_softmax = self.dropout_inference(data, conf.args.n_dropouts, dropout=conf.args.dropout_rate)
 
                 with torch.no_grad():
                     outputs = self.net(data)
                     outputs_softmax = outputs.softmax(dim=1)
 
-                # Get BFA and ABA losses for correct, incorrect, unlabeled samples
-                correct_loss, wrong_loss, unlabeled_loss = self.get_loss(mcd_mean_softmax, outputs_softmax, correct_labels_, wrong_labels_, u_labels_)
+                # Compute BiTTA losses (BFA and ABA)
+                bfa_loss, aba_loss = self.get_loss(mcd_mean_softmax, outputs_softmax, correct_labels_, wrong_labels_, u_labels_)
 
-                # Algorithm 1: Line 27~28 (Final update)
-                loss = conf.args.w_final_loss_unlabeled * unlabeled_loss\
-                       + (conf.args.w_final_loss_correct * correct_loss + conf.args.w_final_loss_wrong * wrong_loss)
+                # Final loss combination
+                loss = conf.args.w_final_bfa_loss * bfa_loss + conf.args.w_final_aba_loss * aba_loss
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
                 
-        # Stochastic restoration for Tiny-ImageNet-C
+        # If needed, apply stochastic restoration for better stability
+        # Only applied in Tiny-ImageNet-C
         if conf.args.restoration_factor > 0:
             for nm, m in self.net.named_modules():
                 for npp, p in m.named_parameters():
@@ -169,24 +183,42 @@ class BiTTA(DNN):
                             p.data = self.src_net_state[f"{nm}.{npp}"] * mask + p * (1. - mask)
 
     def get_loss(self, mc_dropout_softmax, original_softmax, correct_labels_, wrong_labels_, u_labels_):
-        correct_loss = torch.tensor([0.0]).to(device)
-        wrong_loss = torch.tensor([0.0]).to(device)
-        unlabeled_loss = torch.tensor([0.0]).to(device)
+        """
+        Compute BiTTA losses for different types of samples.
+        
+        This method implements the loss computation described in Algorithm 1:
+        - BFA (Binary Feedback Adaptation) loss for correct/wrong samples (Line 20)
+        - ABA (Agreement-Based Adaptation) loss for unlabeled samples (Lines 22-25)
+        
+        Args:
+            mc_dropout_softmax: Monte Carlo dropout softmax predictions
+            original_softmax: Original model softmax predictions  
+            correct_labels_: Labels for correctly predicted samples
+            wrong_labels_: Labels for wrongly predicted samples
+            u_labels_: Labels for unlabeled samples
+            
+        Returns:
+            tuple: (correct_loss, wrong_loss, unlabeled_loss)
+        """
+        bfa_loss = torch.tensor([0.0]).to(device)
+        aba_loss = torch.tensor([0.0]).to(device)
 
-        # Algorithm 1: Line 20 (BFA loss)
+        # BFA loss for correct samples (reward: +1)
         if correct_labels_ is not None:
             correct_dropout_outputs = mc_dropout_softmax[:len(correct_labels_)]
             if conf.args.use_original_conf:
                 correct_dropout_outputs = original_softmax[:len(correct_labels_)]
-            correct_loss = self.class_criterion(correct_dropout_outputs, correct_labels_)
+            bfa_loss = self.class_criterion(correct_dropout_outputs, correct_labels_)
+            
+        # BFA loss for wrong samples (reward: -1)
         if wrong_labels_ is not None:
             start_idx = len(correct_labels_) if correct_labels_ is not None else 0
             end_idx = -len(u_labels_) if u_labels_ is not None else len(mc_dropout_softmax)
 
-            own_wrong_dropout_outputs = mc_dropout_softmax[start_idx:end_idx] # softmax output of wrong sample
-            wrong_loss = -self.class_criterion(own_wrong_dropout_outputs, wrong_labels_)
+            own_wrong_dropout_outputs = mc_dropout_softmax[start_idx:end_idx]
+            bfa_loss += -self.class_criterion(own_wrong_dropout_outputs, wrong_labels_)
 
-        # Algorithm 1: Line 22~25 (ABA loss)
+        # ABA loss for unlabeled samples (reward: +1 only for confident samples)
         if u_labels_ is not None:
             start_idx = len(correct_labels_) if correct_labels_ is not None else 0
             start_idx += len(wrong_labels_) if wrong_labels_ is not None else 0
@@ -195,71 +227,25 @@ class BiTTA(DNN):
             total_u_dropout_outputs = mc_dropout_softmax[start_idx:]
 
             original_pred = original_softmax[start_idx:].argmax(dim=1).detach()
-            same_pred_idx = original_pred == total_u_dropout_outputs.argmax(dim=1)
-            unlabeled_loss = self.class_criterion(own_u_dropout_outputs[same_pred_idx], original_pred[same_pred_idx])
+            confident_sample_idx = original_pred == total_u_dropout_outputs.argmax(dim=1)
+            aba_loss = self.class_criterion(own_u_dropout_outputs[confident_sample_idx], original_pred[confident_sample_idx])
 
-        return correct_loss, wrong_loss, unlabeled_loss
+        return bfa_loss, aba_loss
 
     def pre_active_sample_selection(self):
-        # Algorithm 1: Line 15
+        """
+        Prepare for active sample selection by updating BatchNorm statistics.
+        
+        This implements Algorithm 1: Line 15, which updates the running statistics
+        of BatchNorm layers before performing active sample selection.
+        """
         self.enable_running_stats()
-        self.disable_running_stats()
-
-    def disable_running_stats(self):
-        for module in self.net.modules():
-            if isinstance(module, nn.BatchNorm1d) or isinstance(module, nn.BatchNorm2d):
-                if conf.args.use_learned_stats:  # use learn stats
-                    module.track_running_stats = True
-                    module.momentum = 0
-
-    def enable_running_stats(self):
-        for module in self.net.modules():
-            if isinstance(module, nn.BatchNorm1d) or isinstance(module, nn.BatchNorm2d):
-                if conf.args.use_learned_stats:  # use learn stats
-                    module.track_running_stats = True
-                    module.momentum = conf.args.bn_momentum
+        
+        # Update BN statistics
         self.net.train()
         feats, _, _ = self.fifo.get_memory()
         feats = torch.stack(feats).to(device)
         with torch.no_grad():
-            _ = self.net(feats) # update bn stats
-        pass
+            _ = self.net(feats)
 
-
-def get_tta_transforms(gaussian_std: float = 0.005, soft=False, clip_inputs=False):
-    if conf.args.dataset in ['cifar10', 'cifar100', 'cifar10outdist', 'cifar100outdist']:
-        img_shape = (32, 32, 3)
-    else:
-        img_shape = (224, 224, 3)
-
-    n_pixels = img_shape[0]
-
-    clip_min, clip_max = 0.0, 1.0
-
-    p_hflip = 0.5
-
-    tta_transforms = transforms.Compose([
-        cotta_utils.Clip(0.0, 1.0),
-        cotta_utils.ColorJitterPro(
-            brightness=[0.8, 1.2] if soft else [0.6, 1.4],
-            contrast=[0.85, 1.15] if soft else [0.7, 1.3],
-            saturation=[0.75, 1.25] if soft else [0.5, 1.5],
-            hue=[-0.03, 0.03] if soft else [-0.06, 0.06],
-            gamma=[0.85, 1.15] if soft else [0.7, 1.3]
-        ),
-        transforms.Pad(padding=int(n_pixels / 2), padding_mode='edge'),
-        transforms.RandomAffine(
-            degrees=[-8, 8] if soft else [-15, 15],
-            translate=(1 / 16, 1 / 16),
-            scale=(0.95, 1.05) if soft else (0.9, 1.1),
-            shear=None,
-            resample=PIL.Image.BILINEAR,
-            fillcolor=None
-        ),
-        transforms.GaussianBlur(kernel_size=5, sigma=[0.001, 0.25] if soft else [0.001, 0.5]),
-        transforms.CenterCrop(size=n_pixels),
-        transforms.RandomHorizontalFlip(p=p_hflip),
-        cotta_utils.GaussianNoise(0, gaussian_std),
-        cotta_utils.Clip(clip_min, clip_max)
-    ])
-    return tta_transforms
+        self.disable_running_stats()

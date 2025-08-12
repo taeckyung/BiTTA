@@ -73,7 +73,7 @@ class SoTTA(DNN):
         labels = torch.Tensor(labels).type(torch.long).to(device)
 
         dataset = torch.utils.data.TensorDataset(feats, labels)
-        data_loader = DataLoader(dataset, batch_size=conf.args.tta_batch_size,
+        data_loader = DataLoader(dataset, batch_size=conf.args.update_every_x,
                                  shuffle=True, drop_last=False, pin_memory=False)
 
         for e in range(conf.args.epoch):
@@ -84,39 +84,34 @@ class SoTTA(DNN):
                     self.net.train()
 
                 loss_fn = HLoss(conf.args.temperature)
-
-                # self.net.train()
                 
-                if not conf.args.dropout_softlabel:
-                    feats = feats.to(device)
+                feats = feats.to(device)
+                preds_of_data = self.net(feats)
+
+                loss_first = loss_fn(preds_of_data)
+
+                if conf.args.enable_bitta:
+                    loss_first += self.get_bitta_ssl_loss()
+                    
+                self.optimizer.zero_grad()
+
+                loss_first.backward()
+
+                if not isinstance(self.optimizer, SAM):
+                    self.optimizer.step()
+                else:
+                    # compute \hat{\epsilon(\Theta)} for first order approximation, Eqn. (4)
+                    self.optimizer.first_step(zero_grad=True)
+
                     preds_of_data = self.net(feats)
 
-                    loss_first = loss_fn(preds_of_data)
-
-                    if conf.args.enable_bitta:
-                        loss_first += self.get_bitta_ssl_loss()
-                        
-                    self.optimizer.zero_grad()
-
-                    loss_first.backward()
-
-                    if not isinstance(self.optimizer, SAM):
-                        self.optimizer.step()
-                    else:
-                        # compute \hat{\epsilon(\Theta)} for first order approximation, Eqn. (4)
-                        self.optimizer.first_step(zero_grad=True)
-
-                        preds_of_data = self.net(feats)
-
-                        # second time backward, update model weights using gradients at \Theta+\hat{\epsilon(\Theta)}
-                        loss_second = loss_fn(preds_of_data)
-                        
-                        if conf.args.enable_bitta:
-                            loss_second += self.get_bitta_ssl_loss()
-
-                        loss_second.backward()
-
-                        self.optimizer.second_step(zero_grad=False)
+                    # second time backward, update model weights using gradients at \Theta+\hat{\epsilon(\Theta)}
+                    loss_second = loss_fn(preds_of_data)
                     
-                else:
-                    raise NotImplementedError                    
+                    if conf.args.enable_bitta:
+                        loss_second += self.get_bitta_ssl_loss()
+
+                    loss_second.backward()
+
+                    self.optimizer.second_step(zero_grad=False)
+                    
