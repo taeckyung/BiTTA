@@ -980,7 +980,9 @@ class DNN():
 
         if current_num_sample % conf.args.update_every_x != 0:
             if not (current_num_sample == len(self.target_train_set[0]) and conf.args.update_every_x >= current_num_sample):
-                self.evaluation_online(current_num_sample, self.fifo.get_memory())
+                    return SKIPPED
+        
+        self.evaluation_online(current_num_sample, self.fifo.get_memory())
 
         if conf.args.no_adapt:
             return TRAINED
@@ -1105,7 +1107,6 @@ class DNN():
      
 
         self.budget += n_active_sample
-        print("budget = ", self.budget)
         self.json_active['budgets'] += [self.budget]
 
         if conf.args.wandb:
@@ -1142,6 +1143,11 @@ class DNN():
         self.net.eval()
         selected_feats_ = torch.stack(selected_feats).to(device)
         selected_labels_ = torch.Tensor(selected_labels).to(device)
+
+        with torch.no_grad():
+            y_logit = self.net(selected_feats_)
+            y_entropy = softmax_entropy(y_logit)
+            y_pred = y_logit.max(1, keepdim=False)[1]
 
         mask_correct: torch.Tensor = y_pred == selected_labels_
 
